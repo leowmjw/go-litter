@@ -6,6 +6,7 @@ interface api {
   add: func(value: u64);
   get: func() -> u64;
   login: func(username: string) -> u64;
+  debug-current-state: func();
 }
 
 world app {

@@ -30,3 +30,6 @@ app
 # Ignore WASM files as it is generated
 *.wasm
 
+# Ignore Goland
+.idea
+

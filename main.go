@@ -1,7 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"golitter/app"
+	"strings"
 	"sync/atomic"
 
 	"github.com/golemcloud/golem-go/std"
@@ -17,7 +19,7 @@ type ResponseBody struct {
 
 func init() {
 	// runningAccountID zero value is considered as not logged in
-	runningAccountID = 1
+	//runningAccountID = 1
 	// Initialize map of usernames to accountIDs
 	usernames := make(map[string]uint64)
 	app.SetExportsGolitterAppApi(&AppImpl{
@@ -28,6 +30,12 @@ func init() {
 // AppImpl is the singleton of GoLitter App
 type AppImpl struct {
 	UserNames map[string]uint64
+}
+
+func (a *AppImpl) DebugCurrentState() {
+	std.Init(std.Packages{Os: true, NetHttp: true})
+	//log.Println("Current State:", a)
+	app.WasiLoggingLoggingLog(app.WasiLoggingLoggingLevelError(), "bob", "dood")
 }
 
 // runningAccountID is the next accountID available
@@ -46,6 +54,11 @@ func (*AppImpl) Get() uint64 {
 // Login implements app.ExportsGolitterAppApi.
 func (a *AppImpl) Login(username string) uint64 {
 	std.Init(std.Packages{Os: true, NetHttp: true})
+	// If username is empty; is invalid; to not go further ..
+	if strings.TrimSpace(username) == "" {
+		app.WasiLoggingLoggingLog(app.WasiLoggingLoggingLevelCritical(), "xxx", "Please specify username!!")
+		return 0
+	}
 	// Check if the username is already in the database
 	if accountID, exists := a.UserNames[username]; exists {
 		// If yes, return the accountID
@@ -56,9 +69,10 @@ func (a *AppImpl) Login(username string) uint64 {
 	// Atomically update the runningAccountID
 	newAccountID := atomic.AddUint64(&runningAccountID, 1)
 
-	// Append the username to the map
+	// Append the username to the map with the current runningAccountID
 	a.UserNames[username] = newAccountID
 
+	app.WasiLoggingLoggingLog(app.WasiLoggingLoggingLevelCritical(), "xxx", fmt.Sprint(a.UserNames))
 	// Return the new accountID
 	return newAccountID
 }
