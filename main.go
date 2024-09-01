@@ -9,14 +9,6 @@ import (
 	"github.com/golemcloud/golem-go/std"
 )
 
-type RequestBody struct {
-	CurrentTotal uint64
-}
-
-type ResponseBody struct {
-	Message string
-}
-
 func init() {
 	// runningAccountID zero value is considered as not logged in
 	//runningAccountID = 1
@@ -31,6 +23,9 @@ func init() {
 type AppImpl struct {
 	UserNames map[string]uint64
 }
+
+// Sessions is to keep track of active sessions; key is the sessionID, value is the accountID, has an expiration time
+// var Sessions map[uint64]uint64
 
 func (a *AppImpl) DebugCurrentState() {
 	std.Init(std.Packages{Os: true, NetHttp: true})
@@ -76,30 +71,6 @@ func (a *AppImpl) Login(username string) uint64 {
 	// Return the new accountID
 	return newAccountID
 }
-
-// func init() {
-// 	app.SetExportsComponentsAccountsApi(&AccountsImpl{})
-// }
-
-// // total State can be stored in global variables
-// var total uint64
-
-// type AccountsImpl struct {
-// }
-
-// // Implementation of the exported interface
-
-// func (e *AccountsImpl) Add(value uint64) {
-// 	std.Init(std.Packages{Os: true, NetHttp: true})
-
-// 	total += value
-// }
-
-// func (e *AccountsImpl) Get() uint64 {
-// 	std.Init(std.Packages{Os: true, NetHttp: true})
-
-// 	return total
-// }
 
 func main() {
 }
