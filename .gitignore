@@ -33,3 +33,6 @@ app
 # Ignore Goland
 .idea
 
+# Ignore Mac files
+.DS_Store
+

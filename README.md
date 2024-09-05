@@ -6,6 +6,13 @@ Inspired by the article [How we reduced the cost of building Twitter at Twitter-
 
 Its DataFlow model can be done equivalently using the Golem Cloud Architecture; similar to how [Golem Timeline](https://github.com/afsalthaj/golem-timeline)
 
+## Instructions
+- Command to run ; know worldode ..
+
+```./gcloud-cli stubgen generate --source-wit-root go-litter/components/status/wit --dest-crate-root go-litter/components/status_stub```
+
+
+
 ## High Level Design
 
 The initial naive port will start with GoLitter App, Account, Status, Follow-And-Blacklist Depots.
