@@ -3,9 +3,11 @@ package main
 import (
 	"fmt"
 	"golitter/app"
+	"golitter/lib/cfg"
 	"strings"
 	"sync/atomic"
 
+	"github.com/golemcloud/golem-go/golemhost"
 	"github.com/golemcloud/golem-go/std"
 )
 
@@ -38,12 +40,37 @@ var runningAccountID uint64
 
 // Add implements app.ExportsGolitterAppApi.
 func (*AppImpl) Add(value uint64) {
-	panic("unimplemented")
+	std.Init(std.Packages{Os: true, NetHttp: true})
+	selfWorkerName := golemhost.GetSelfMetadata().WorkerId.WorkerName
+
+	componentThreeWorkerURI, err := cfg.ComponentThreeWorkerURI(selfWorkerName)
+	if err != nil {
+		fmt.Printf("%+v\n", err)
+		return
+	}
+
+	p := app.NewComponentThreeApi(app.GolemRpc0_1_0_TypesUri(componentThreeWorkerURI))
+	defer p.Drop()
+
+	p.Add(value)
 }
 
 // Get implements app.ExportsGolitterAppApi.
 func (*AppImpl) Get() uint64 {
-	panic("unimplemented")
+	std.Init(std.Packages{Os: true, NetHttp: true})
+	selfWorkerName := golemhost.GetSelfMetadata().WorkerId.WorkerName
+
+	componentThreeWorkerURI, err := cfg.ComponentThreeWorkerURI(selfWorkerName)
+	if err != nil {
+		fmt.Printf("%+v\n", err)
+		return 0
+	}
+
+	p := app.NewComponentThreeApi(app.GolemRpc0_1_0_TypesUri(componentThreeWorkerURI))
+	defer p.Drop()
+
+	// Use BlockingGet for sync; otherwise will panic!! Otherwise is Optional!
+	return p.BlockingGet()
 }
 
 // Login implements app.ExportsGolitterAppApi.

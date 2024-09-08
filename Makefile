@@ -1,4 +1,7 @@
-.PHONY: build bindings compile clean
+.PHONY: compose build bindings compile clean
+
+compose: build
+	@../gcloud-cli stubgen compose --source-wasm app.wasm --stub-wasm target/stub/component-three/stub.wasm --dest-wasm app.wasm
 
 build: compile
 	wasm-tools component embed ./wit app.module.wasm --output app.embed.wasm

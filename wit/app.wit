@@ -34,5 +34,8 @@ world app {
   import wasi:sockets/ip-name-lookup@0.2.0;
   import wasi:sockets/instance-network@0.2.0;
 
+  // Project Component dependencies
+  import components:component-three-stub/stub-component-three;
+
   export api;
 }

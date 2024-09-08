@@ -36,3 +36,6 @@ app
 # Ignore Mac files
 .DS_Store
 
+# Ignore Rust output
+target
+
