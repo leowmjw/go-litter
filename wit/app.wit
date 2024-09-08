@@ -36,6 +36,7 @@ world app {
 
   // Project Component dependencies
   import components:component-three-stub/stub-component-three;
+  import components:status-stub/stub-status;
 
   export api;
 }

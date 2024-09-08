@@ -52,7 +52,7 @@ func (*AppImpl) Add(value uint64) {
 	p := app.NewComponentThreeApi(app.GolemRpc0_1_0_TypesUri(componentThreeWorkerURI))
 	defer p.Drop()
 
-	p.Add(value)
+	p.BlockingAdd(value)
 }
 
 // Get implements app.ExportsGolitterAppApi.
@@ -66,6 +66,7 @@ func (*AppImpl) Get() uint64 {
 		return 0
 	}
 
+	//s := app.NewApi(app.GolemRpc0_1_0_TypesUri(componentThreeWorkerURI))
 	p := app.NewComponentThreeApi(app.GolemRpc0_1_0_TypesUri(componentThreeWorkerURI))
 	defer p.Drop()
 

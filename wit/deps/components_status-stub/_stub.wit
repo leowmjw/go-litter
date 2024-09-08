@@ -1,0 +1,35 @@
+package components:status-stub;
+
+interface stub-status {
+  use golem:rpc/types@0.1.0.{uri as golem-rpc-uri};
+  use wasi:io/poll@0.2.0.{pollable as wasi-io-pollable};
+
+  resource future-get-summary-result {
+    subscribe: func() -> wasi-io-pollable;
+    get: func() -> option<string>;
+  }
+  resource future-get-status-result {
+    subscribe: func() -> wasi-io-pollable;
+    get: func() -> option<string>;
+  }
+  resource future-post-status-result {
+    subscribe: func() -> wasi-io-pollable;
+    get: func() -> option<u64>;
+  }
+  resource api {
+    constructor(location: golem-rpc-uri);
+    blocking-get-summary: func(status-id: u64) -> string;
+    get-summary: func(status-id: u64) -> future-get-summary-result;
+    blocking-get-status: func(status-id: u64) -> string;
+    get-status: func(status-id: u64) -> future-get-status-result;
+    blocking-post-status: func(account-id: u64, status: string) -> u64;
+    post-status: func(account-id: u64, status: string) -> future-post-status-result;
+    blocking-debug-current-state: func();
+    debug-current-state: func();
+  }
+
+}
+
+world wasm-rpc-stub-status {
+  export stub-status;
+}
