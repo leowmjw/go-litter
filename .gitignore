@@ -39,3 +39,5 @@ app
 # Ignore Rust output
 target
 
+# Ignore Mise
+mise.local.toml
