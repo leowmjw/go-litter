@@ -2,7 +2,7 @@ package types
 
 import "time"
 
-type UserID string
+type UserID = string
 
 type Profile struct {
 	UserID           UserID
@@ -16,7 +16,7 @@ type Profile struct {
 	RegistrationUUID string
 }
 
-type PostID int64
+type PostID = int64
 
 type Post struct {
 	PostID    PostID
@@ -27,10 +27,10 @@ type Post struct {
 }
 
 type ResolvedPost struct {
-	UserID     string
+	UserID
 	Content    string
 	Display    string
 	ProfilePic string
-	PostID     int64
-	CreatedAt  time.Time
+	PostID
+	CreatedAt time.Time
 }

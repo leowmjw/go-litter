@@ -4,7 +4,10 @@ import "golitter/internal/types"
 
 //
 //
-//Multiple PStates are needed to support all these tasks, although some tasks are supported by the same PState. As you gain experience using Rama, mapping the set of queries you need to support your application to a collection of PStates becomes second nature. To support the tasks for this application, we’ll build the following PStates:
+//Multiple PStates are needed to support all these tasks, although some tasks are supported by the same PState.
+// As you gain experience using Rama, mapping the set of queries you need to support your application to a collection
+// of PStates becomes second nature.
+// To support the tasks for this application, we’ll build the following PStates:
 
 //$$profiles
 //
