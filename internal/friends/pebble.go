@@ -6,18 +6,18 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/v2"
 
 	"golitter/internal/types"
 )
 
-// pebbleBackingStore implements Pebble-backed storage
-type pebbleBackingStore struct {
+// pebbleRelations implements Pebble-backed friendship relationships
+type pebbleRelations struct {
 	db *pebble.DB
 }
 
-func newPebbleBackingStore(db *pebble.DB) *pebbleBackingStore {
-	return &pebbleBackingStore{db: db}
+func newPebbleRelations(db *pebble.DB) *pebbleRelations {
+	return &pebbleRelations{db: db}
 }
 
 // Key encoding helpers
@@ -65,8 +65,8 @@ func nextPrefix(pfx []byte) []byte {
 	return nil
 }
 
-func (s *pebbleBackingStore) friendsAddBidirectional(a, b types.UserID) error {
-	bch := s.db.NewBatch()
+func (p *pebbleRelations) addRelation(a, b types.UserID) error {
+	bch := p.db.NewBatch()
 	defer bch.Close()
 	_ = bch.Set(kFriendsSet(a, b), nil, nil)
 	_ = bch.Set(kFriendsSet(b, a), nil, nil)
@@ -75,8 +75,8 @@ func (s *pebbleBackingStore) friendsAddBidirectional(a, b types.UserID) error {
 	return bch.Commit(pebble.Sync)
 }
 
-func (s *pebbleBackingStore) friendsRemoveBidirectional(a, b types.UserID) error {
-	bch := s.db.NewBatch()
+func (p *pebbleRelations) removeRelation(a, b types.UserID) error {
+	bch := p.db.NewBatch()
 	defer bch.Close()
 	_ = bch.Delete(kFriendsSet(a, b), nil)
 	_ = bch.Delete(kFriendsSet(b, a), nil)
@@ -85,8 +85,8 @@ func (s *pebbleBackingStore) friendsRemoveBidirectional(a, b types.UserID) error
 	return bch.Commit(pebble.Sync)
 }
 
-func (s *pebbleBackingStore) friendsCount(u types.UserID) (int, error) {
-	v, c, err := s.db.Get(kFriendsSize(u))
+func (p *pebbleRelations) countRelations(u types.UserID) (int, error) {
+	v, c, err := p.db.Get(kFriendsSize(u))
 	if err == pebble.ErrNotFound {
 		return 0, nil
 	}
@@ -97,8 +97,8 @@ func (s *pebbleBackingStore) friendsCount(u types.UserID) (int, error) {
 	return int(rdI64(v)), nil
 }
 
-func (s *pebbleBackingStore) isFriends(a, b types.UserID) (bool, error) {
-	_, c, err := s.db.Get(kFriendsSet(a, b))
+func (p *pebbleRelations) checkRelation(a, b types.UserID) (bool, error) {
+	_, c, err := p.db.Get(kFriendsSet(a, b))
 	if err == pebble.ErrNotFound {
 		return false, nil
 	}
@@ -109,10 +109,10 @@ func (s *pebbleBackingStore) isFriends(a, b types.UserID) (bool, error) {
 	return true, nil
 }
 
-func (s *pebbleBackingStore) getFriends(u types.UserID) ([]types.UserID, error) {
+func (p *pebbleRelations) listRelations(u types.UserID) ([]types.UserID, error) {
 	pfx := pfxFriends(u)
 	ub := nextPrefix(pfx)
-	it, err := s.db.NewIter(&pebble.IterOptions{LowerBound: pfx, UpperBound: ub})
+	it, err := p.db.NewIter(&pebble.IterOptions{LowerBound: pfx, UpperBound: ub})
 	if err != nil {
 		return nil, err
 	}
@@ -128,19 +128,30 @@ func (s *pebbleBackingStore) getFriends(u types.UserID) ([]types.UserID, error) 
 	return result, nil
 }
 
-func (s *pebbleBackingStore) outgoingAdd(from, to types.UserID) error {
-	return s.db.Set(kOut(from, to), nil, pebble.Sync)
+func (p *pebbleRelations) addOutgoingRequest(from, to types.UserID) error {
+	return p.db.Set(kOut(from, to), nil, pebble.Sync)
 }
 
-func (s *pebbleBackingStore) incomingAdd(from, to types.UserID) error {
-	return s.db.Set(kIn(from, to), nil, pebble.Sync)
+func (p *pebbleRelations) addIncomingRequest(from, to types.UserID) error {
+	return p.db.Set(kIn(from, to), nil, pebble.Sync)
 }
 
-func (s *pebbleBackingStore) outgoingRemove(from, to types.UserID) error {
-	return s.db.Delete(kOut(from, to), pebble.Sync)
+func (p *pebbleRelations) removeOutgoingRequest(from, to types.UserID) error {
+	return p.db.Delete(kOut(from, to), pebble.Sync)
 }
 
-func (s *pebbleBackingStore) incomingRemove(from, to types.UserID) error {
-	return s.db.Delete(kIn(from, to), pebble.Sync)
+func (p *pebbleRelations) removeIncomingRequest(from, to types.UserID) error {
+	return p.db.Delete(kIn(from, to), pebble.Sync)
 }
 
+func (p *pebbleRelations) hasIncomingRequest(from, to types.UserID) (bool, error) {
+	_, c, err := p.db.Get(kIn(from, to))
+	if err == pebble.ErrNotFound {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	_ = c.Close()
+	return true, nil
+}

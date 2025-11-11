@@ -8,25 +8,20 @@ import (
 	"golitter/internal/types"
 )
 
-// memBackingStore implements in-memory storage using gods library
-type memBackingStore struct {
+// memRelations implements in-memory friendship relationships using gods library
+type memRelations struct {
 	mu       sync.RWMutex
 	friends  map[types.UserID]*treeset.Set[string]
 	outgoing map[types.UserID]*treeset.Set[string]
 	incoming map[types.UserID]*treeset.Set[string]
 }
 
-func newMemBackingStore() *memBackingStore {
-	return &memBackingStore{
+func newMemRelations() *memRelations {
+	return &memRelations{
 		friends:  make(map[types.UserID]*treeset.Set[string]),
 		outgoing: make(map[types.UserID]*treeset.Set[string]),
 		incoming: make(map[types.UserID]*treeset.Set[string]),
 	}
-}
-
-// NewMemBackingStore creates a new shared in-memory backing store
-func NewMemBackingStore() *memBackingStore {
-	return newMemBackingStore()
 }
 
 func sset(m map[types.UserID]*treeset.Set[string], u types.UserID) *treeset.Set[string] {
@@ -36,48 +31,48 @@ func sset(m map[types.UserID]*treeset.Set[string], u types.UserID) *treeset.Set[
 	return m[u]
 }
 
-func (s *memBackingStore) friendsAddBidirectional(a, b types.UserID) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sset(s.friends, a).Add(string(b))
-	sset(s.friends, b).Add(string(a))
+func (m *memRelations) addRelation(a, b types.UserID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sset(m.friends, a).Add(string(b))
+	sset(m.friends, b).Add(string(a))
 	return nil
 }
 
-func (s *memBackingStore) friendsRemoveBidirectional(a, b types.UserID) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.friends[a] != nil {
-		s.friends[a].Remove(string(b))
+func (m *memRelations) removeRelation(a, b types.UserID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.friends[a] != nil {
+		m.friends[a].Remove(string(b))
 	}
-	if s.friends[b] != nil {
-		s.friends[b].Remove(string(a))
+	if m.friends[b] != nil {
+		m.friends[b].Remove(string(a))
 	}
 	return nil
 }
 
-func (s *memBackingStore) friendsCount(u types.UserID) (int, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.friends[u] == nil {
+func (m *memRelations) countRelations(u types.UserID) (int, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.friends[u] == nil {
 		return 0, nil
 	}
-	return s.friends[u].Size(), nil
+	return m.friends[u].Size(), nil
 }
 
-func (s *memBackingStore) isFriends(a, b types.UserID) (bool, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.friends[a] == nil {
+func (m *memRelations) checkRelation(a, b types.UserID) (bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.friends[a] == nil {
 		return false, nil
 	}
-	return s.friends[a].Contains(string(b)), nil
+	return m.friends[a].Contains(string(b)), nil
 }
 
-func (s *memBackingStore) getFriends(u types.UserID) ([]types.UserID, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	set := s.friends[u]
+func (m *memRelations) listRelations(u types.UserID) ([]types.UserID, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	set := m.friends[u]
 	if set == nil {
 		return nil, nil
 	}
@@ -89,35 +84,43 @@ func (s *memBackingStore) getFriends(u types.UserID) ([]types.UserID, error) {
 	return result, nil
 }
 
-func (s *memBackingStore) outgoingAdd(from, to types.UserID) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sset(s.outgoing, from).Add(string(to))
+func (m *memRelations) addOutgoingRequest(from, to types.UserID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sset(m.outgoing, from).Add(string(to))
 	return nil
 }
 
-func (s *memBackingStore) incomingAdd(from, to types.UserID) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sset(s.incoming, to).Add(string(from))
+func (m *memRelations) addIncomingRequest(from, to types.UserID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sset(m.incoming, to).Add(string(from))
 	return nil
 }
 
-func (s *memBackingStore) outgoingRemove(from, to types.UserID) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.outgoing[from] != nil {
-		s.outgoing[from].Remove(string(to))
+func (m *memRelations) removeOutgoingRequest(from, to types.UserID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.outgoing[from] != nil {
+		m.outgoing[from].Remove(string(to))
 	}
 	return nil
 }
 
-func (s *memBackingStore) incomingRemove(from, to types.UserID) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.incoming[to] != nil {
-		s.incoming[to].Remove(string(from))
+func (m *memRelations) removeIncomingRequest(from, to types.UserID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.incoming[to] != nil {
+		m.incoming[to].Remove(string(from))
 	}
 	return nil
 }
 
+func (m *memRelations) hasIncomingRequest(from, to types.UserID) (bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.incoming[to] == nil {
+		return false, nil
+	}
+	return m.incoming[to].Contains(string(from)), nil
+}
