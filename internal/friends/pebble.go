@@ -13,11 +13,15 @@ import (
 
 // pebbleRelations implements Pebble-backed friendship relationships
 type pebbleRelations struct {
-	db *pebble.DB
+	db        *pebble.DB
+	writeOpts *pebble.WriteOptions
 }
 
-func newPebbleRelations(db *pebble.DB) *pebbleRelations {
-	return &pebbleRelations{db: db}
+func newPebbleRelations(db *pebble.DB, writeOpts *pebble.WriteOptions) *pebbleRelations {
+	if writeOpts == nil {
+		writeOpts = pebble.Sync
+	}
+	return &pebbleRelations{db: db, writeOpts: writeOpts}
 }
 
 // Key encoding helpers
@@ -39,6 +43,14 @@ func kOut(u, v types.UserID) []byte {
 
 func kIn(u, v types.UserID) []byte {
 	return []byte(fmt.Sprintf("in/%s/set/%s", v, u))
+}
+
+func pfxOut(u types.UserID) []byte {
+	return []byte(fmt.Sprintf("out/%s/set/", u))
+}
+
+func pfxIn(u types.UserID) []byte {
+	return []byte(fmt.Sprintf("in/%s/set/", u))
 }
 
 func beI64(v int64) []byte {
@@ -72,7 +84,7 @@ func (p *pebbleRelations) addRelation(a, b types.UserID) error {
 	_ = bch.Set(kFriendsSet(b, a), nil, nil)
 	_ = bch.Merge(kFriendsSize(a), beI64(+1), nil)
 	_ = bch.Merge(kFriendsSize(b), beI64(+1), nil)
-	return bch.Commit(pebble.Sync)
+	return bch.Commit(p.writeOpts)
 }
 
 func (p *pebbleRelations) removeRelation(a, b types.UserID) error {
@@ -82,7 +94,7 @@ func (p *pebbleRelations) removeRelation(a, b types.UserID) error {
 	_ = bch.Delete(kFriendsSet(b, a), nil)
 	_ = bch.Merge(kFriendsSize(a), beI64(-1), nil)
 	_ = bch.Merge(kFriendsSize(b), beI64(-1), nil)
-	return bch.Commit(pebble.Sync)
+	return bch.Commit(p.writeOpts)
 }
 
 func (p *pebbleRelations) countRelations(u types.UserID) (int, error) {
@@ -129,19 +141,19 @@ func (p *pebbleRelations) listRelations(u types.UserID) ([]types.UserID, error) 
 }
 
 func (p *pebbleRelations) addOutgoingRequest(from, to types.UserID) error {
-	return p.db.Set(kOut(from, to), nil, pebble.Sync)
+	return p.db.Set(kOut(from, to), nil, p.writeOpts)
 }
 
 func (p *pebbleRelations) addIncomingRequest(from, to types.UserID) error {
-	return p.db.Set(kIn(from, to), nil, pebble.Sync)
+	return p.db.Set(kIn(from, to), nil, p.writeOpts)
 }
 
 func (p *pebbleRelations) removeOutgoingRequest(from, to types.UserID) error {
-	return p.db.Delete(kOut(from, to), pebble.Sync)
+	return p.db.Delete(kOut(from, to), p.writeOpts)
 }
 
 func (p *pebbleRelations) removeIncomingRequest(from, to types.UserID) error {
-	return p.db.Delete(kIn(from, to), pebble.Sync)
+	return p.db.Delete(kIn(from, to), p.writeOpts)
 }
 
 func (p *pebbleRelations) hasIncomingRequest(from, to types.UserID) (bool, error) {
@@ -154,4 +166,54 @@ func (p *pebbleRelations) hasIncomingRequest(from, to types.UserID) (bool, error
 	}
 	_ = c.Close()
 	return true, nil
+}
+
+func (p *pebbleRelations) hasOutgoingRequest(from, to types.UserID) (bool, error) {
+	_, c, err := p.db.Get(kOut(from, to))
+	if err == pebble.ErrNotFound {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	_ = c.Close()
+	return true, nil
+}
+
+func (p *pebbleRelations) listOutgoingRequests(u types.UserID) ([]types.UserID, error) {
+	pfx := pfxOut(u)
+	ub := nextPrefix(pfx)
+	it, err := p.db.NewIter(&pebble.IterOptions{LowerBound: pfx, UpperBound: ub})
+	if err != nil {
+		return nil, err
+	}
+	defer it.Close()
+	var result []types.UserID
+	for ok := it.First(); ok; ok = it.Next() {
+		val := string(bytes.TrimPrefix(it.Key(), pfx))
+		result = append(result, types.UserID(val))
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i] < result[j]
+	})
+	return result, nil
+}
+
+func (p *pebbleRelations) listIncomingRequests(u types.UserID) ([]types.UserID, error) {
+	pfx := pfxIn(u)
+	ub := nextPrefix(pfx)
+	it, err := p.db.NewIter(&pebble.IterOptions{LowerBound: pfx, UpperBound: ub})
+	if err != nil {
+		return nil, err
+	}
+	defer it.Close()
+	var result []types.UserID
+	for ok := it.First(); ok; ok = it.Next() {
+		val := string(bytes.TrimPrefix(it.Key(), pfx))
+		result = append(result, types.UserID(val))
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i] < result[j]
+	})
+	return result, nil
 }

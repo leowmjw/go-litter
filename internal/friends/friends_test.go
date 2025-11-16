@@ -2,6 +2,7 @@ package friends_test
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 	"testing"
 
@@ -68,11 +69,11 @@ func TestMemBasics(t *testing.T) {
 	count, err = bob.FriendsCount()
 	require.NoError(t, err)
 	require.Equal(t, 0, count)
-	
+
 	isFriend, err := alice.IsFriends("bob")
 	require.NoError(t, err)
 	require.False(t, isFriend)
-	
+
 	friendsList, err := alice.GetFriends()
 	require.NoError(t, err)
 	require.Empty(t, friendsList)
@@ -90,14 +91,14 @@ func TestMemBasics(t *testing.T) {
 	count, err = bob.FriendsCount()
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
-	
+
 	isFriend, err = alice.IsFriends("bob")
 	require.NoError(t, err)
 	require.True(t, isFriend)
 	isFriend, err = bob.IsFriends("alice")
 	require.NoError(t, err)
 	require.True(t, isFriend)
-	
+
 	friendsList, err = alice.GetFriends()
 	require.NoError(t, err)
 	require.Equal(t, []types.UserID{"bob"}, friendsList)
@@ -255,11 +256,15 @@ func TestMemEdgeCases(t *testing.T) {
 	require.NoError(t, alice.AddFriendRequest("nonexistent"))
 	require.NoError(t, alice.CancelFriendRequest("nonexistent"))
 
-	// Unfriend someone who isn't a friend (should be safe)
-	require.NoError(t, alice.Unfriend("stranger"))
+	// Unfriend someone who isn't a friend (should return error)
+	err := alice.Unfriend("stranger")
+	require.Error(t, err)
+	require.ErrorIs(t, err, friends.ErrNotFriends)
 
-	// Accept request from someone who didn't send one (should be safe)
-	require.NoError(t, alice.AcceptFriendRequest("stranger"))
+	// Accept request from someone who didn't send one (should return error)
+	err = alice.AcceptFriendRequest("stranger")
+	require.Error(t, err)
+	require.ErrorIs(t, err, friends.ErrNoIncomingRequest)
 
 	// Check friends of user with no friends
 	count, err := alice.FriendsCount()
@@ -308,11 +313,11 @@ func TestPebbleBasics(t *testing.T) {
 	count, err = bob.FriendsCount()
 	require.NoError(t, err)
 	require.Equal(t, 0, count)
-	
+
 	isFriend, err := alice.IsFriends("bob")
 	require.NoError(t, err)
 	require.False(t, isFriend)
-	
+
 	friendsList, err := alice.GetFriends()
 	require.NoError(t, err)
 	require.Empty(t, friendsList)
@@ -330,14 +335,14 @@ func TestPebbleBasics(t *testing.T) {
 	count, err = bob.FriendsCount()
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
-	
+
 	isFriend, err = alice.IsFriends("bob")
 	require.NoError(t, err)
 	require.True(t, isFriend)
 	isFriend, err = bob.IsFriends("alice")
 	require.NoError(t, err)
 	require.True(t, isFriend)
-	
+
 	friendsList, err = bob.GetFriends()
 	require.NoError(t, err)
 	require.Equal(t, []types.UserID{"alice"}, friendsList)
@@ -508,11 +513,15 @@ func TestPebbleEdgeCases(t *testing.T) {
 	require.NoError(t, alice.AddFriendRequest("nonexistent"))
 	require.NoError(t, alice.CancelFriendRequest("nonexistent"))
 
-	// Unfriend someone who isn't a friend (should be safe)
-	require.NoError(t, alice.Unfriend("stranger"))
+	// Unfriend someone who isn't a friend (should return error)
+	err := alice.Unfriend("stranger")
+	require.Error(t, err)
+	require.ErrorIs(t, err, friends.ErrNotFriends)
 
-	// Accept request from someone who didn't send one (should be safe)
-	require.NoError(t, alice.AcceptFriendRequest("stranger"))
+	// Accept request from someone who didn't send one (should return error)
+	err = alice.AcceptFriendRequest("stranger")
+	require.Error(t, err)
+	require.ErrorIs(t, err, friends.ErrNoIncomingRequest)
 
 	// Check friends of user with no friends
 	count, err := alice.FriendsCount()
@@ -657,4 +666,354 @@ func TestRealisticScenario(t *testing.T) {
 	require.Contains(t, friendsList, "dave")
 	require.NotContains(t, friendsList, "charlie")
 	require.NotContains(t, friendsList, "eve")
+}
+
+// New tests for error handling and validation
+
+func TestMemSelfFriendship(t *testing.T) {
+	friendship := friends.NewMem()
+	alice := friendship.ForUser("alice")
+
+	// Cannot send friend request to self
+	err := alice.AddFriendRequest("alice")
+	require.Error(t, err)
+	require.ErrorIs(t, err, friends.ErrSelfFriendship)
+
+	// Cannot cancel request to self
+	err = alice.CancelFriendRequest("alice")
+	require.Error(t, err)
+	require.ErrorIs(t, err, friends.ErrSelfFriendship)
+
+	// Cannot accept request from self
+	err = alice.AcceptFriendRequest("alice")
+	require.Error(t, err)
+	require.ErrorIs(t, err, friends.ErrSelfFriendship)
+
+	// Cannot unfriend self
+	err = alice.Unfriend("alice")
+	require.Error(t, err)
+	require.ErrorIs(t, err, friends.ErrSelfFriendship)
+}
+
+func TestMemDuplicateRequests(t *testing.T) {
+	friendship := friends.NewMem()
+	alice := friendship.ForUser("alice")
+
+	// Send request
+	require.NoError(t, alice.AddFriendRequest("bob"))
+
+	// Try to send again
+	err := alice.AddFriendRequest("bob")
+	require.Error(t, err)
+	require.ErrorIs(t, err, friends.ErrRequestAlreadyExists)
+}
+
+func TestMemRequestAlreadyFriends(t *testing.T) {
+	friendship := friends.NewMem()
+	alice := friendship.ForUser("alice")
+	bob := friendship.ForUser("bob")
+
+	// Become friends
+	require.NoError(t, alice.AddFriendRequest("bob"))
+	require.NoError(t, bob.AcceptFriendRequest("alice"))
+
+	// Try to send request when already friends
+	err := alice.AddFriendRequest("bob")
+	require.Error(t, err)
+	require.ErrorIs(t, err, friends.ErrAlreadyFriends)
+}
+
+func TestMemRequestListing(t *testing.T) {
+	friendship := friends.NewMem()
+	alice := friendship.ForUser("alice")
+	bob := friendship.ForUser("bob")
+	_ = friendship.ForUser("charlie")
+
+	// Alice sends requests to Bob and Charlie
+	require.NoError(t, alice.AddFriendRequest("bob"))
+	require.NoError(t, alice.AddFriendRequest("charlie"))
+
+	// Check Alice's outgoing requests
+	outgoing, err := alice.GetOutgoingRequests()
+	require.NoError(t, err)
+	require.Len(t, outgoing, 2)
+	require.Contains(t, outgoing, types.UserID("bob"))
+	require.Contains(t, outgoing, types.UserID("charlie"))
+
+	// Check Bob's incoming requests
+	incoming, err := bob.GetIncomingRequests()
+	require.NoError(t, err)
+	require.Len(t, incoming, 1)
+	require.Contains(t, incoming, types.UserID("alice"))
+
+	// Bob accepts
+	require.NoError(t, bob.AcceptFriendRequest("alice"))
+
+	// Now Alice should only have one outgoing request
+	outgoing, err = alice.GetOutgoingRequests()
+	require.NoError(t, err)
+	require.Len(t, outgoing, 1)
+	require.Contains(t, outgoing, types.UserID("charlie"))
+
+	// Bob should have no incoming requests
+	incoming, err = bob.GetIncomingRequests()
+	require.NoError(t, err)
+	require.Empty(t, incoming)
+}
+
+func TestMemMemoryCleanup(t *testing.T) {
+	friendship := friends.NewMem()
+	alice := friendship.ForUser("alice")
+	bob := friendship.ForUser("bob")
+
+	// Become friends
+	require.NoError(t, alice.AddFriendRequest("bob"))
+	require.NoError(t, bob.AcceptFriendRequest("alice"))
+
+	// Verify friendship
+	isFriend, err := alice.IsFriends("bob")
+	require.NoError(t, err)
+	require.True(t, isFriend)
+
+	// Unfriend
+	require.NoError(t, alice.Unfriend("bob"))
+
+	// Verify the internal maps are cleaned up by becoming friends again
+	require.NoError(t, alice.AddFriendRequest("bob"))
+	require.NoError(t, bob.AcceptFriendRequest("alice"))
+	require.NoError(t, alice.Unfriend("bob"))
+
+	// Send and cancel request to verify cleanup
+	require.NoError(t, alice.AddFriendRequest("bob"))
+	require.NoError(t, alice.CancelFriendRequest("bob"))
+}
+
+func TestMemConcurrency(t *testing.T) {
+	t.Parallel()
+	friendship := friends.NewMem()
+
+	// Create 100 users concurrently sending requests
+	const numUsers = 100
+	done := make(chan bool, numUsers)
+
+	for i := 0; i < numUsers; i++ {
+		go func(id int) {
+			defer func() { done <- true }()
+			userID := types.UserID(fmt.Sprintf("user%d", id))
+			user := friendship.ForUser(userID)
+
+			// Send requests to next 5 users
+			for j := 1; j <= 5; j++ {
+				targetID := types.UserID(fmt.Sprintf("user%d", (id+j)%numUsers))
+				_ = user.AddFriendRequest(targetID)
+			}
+
+			// Accept some incoming requests
+			incoming, _ := user.GetIncomingRequests()
+			for _, from := range incoming {
+				_ = user.AcceptFriendRequest(from)
+			}
+		}(i)
+	}
+
+	// Wait for all goroutines
+	for i := 0; i < numUsers; i++ {
+		<-done
+	}
+
+	// Verify no crashes and basic consistency
+	user0 := friendship.ForUser("user0")
+	count, err := user0.FriendsCount()
+	require.NoError(t, err)
+	t.Logf("User0 has %d friends", count)
+}
+
+func TestPebbleSelfFriendship(t *testing.T) {
+	db := openDB(t)
+	defer db.Close()
+
+	friendship := friends.NewPebble(db)
+	alice := friendship.ForUser("alice")
+
+	// Cannot send friend request to self
+	err := alice.AddFriendRequest("alice")
+	require.Error(t, err)
+	require.ErrorIs(t, err, friends.ErrSelfFriendship)
+
+	// Cannot cancel request to self
+	err = alice.CancelFriendRequest("alice")
+	require.Error(t, err)
+	require.ErrorIs(t, err, friends.ErrSelfFriendship)
+
+	// Cannot accept request from self
+	err = alice.AcceptFriendRequest("alice")
+	require.Error(t, err)
+	require.ErrorIs(t, err, friends.ErrSelfFriendship)
+
+	// Cannot unfriend self
+	err = alice.Unfriend("alice")
+	require.Error(t, err)
+	require.ErrorIs(t, err, friends.ErrSelfFriendship)
+}
+
+func TestPebbleDuplicateRequests(t *testing.T) {
+	db := openDB(t)
+	defer db.Close()
+
+	friendship := friends.NewPebble(db)
+	alice := friendship.ForUser("alice")
+
+	// Send request
+	require.NoError(t, alice.AddFriendRequest("bob"))
+
+	// Try to send again
+	err := alice.AddFriendRequest("bob")
+	require.Error(t, err)
+	require.ErrorIs(t, err, friends.ErrRequestAlreadyExists)
+}
+
+func TestPebbleRequestAlreadyFriends(t *testing.T) {
+	db := openDB(t)
+	defer db.Close()
+
+	friendship := friends.NewPebble(db)
+	alice := friendship.ForUser("alice")
+	bob := friendship.ForUser("bob")
+
+	// Become friends
+	require.NoError(t, alice.AddFriendRequest("bob"))
+	require.NoError(t, bob.AcceptFriendRequest("alice"))
+
+	// Try to send request when already friends
+	err := alice.AddFriendRequest("bob")
+	require.Error(t, err)
+	require.ErrorIs(t, err, friends.ErrAlreadyFriends)
+}
+
+func TestPebbleRequestListing(t *testing.T) {
+	db := openDB(t)
+	defer db.Close()
+
+	friendship := friends.NewPebble(db)
+	alice := friendship.ForUser("alice")
+	bob := friendship.ForUser("bob")
+	_ = friendship.ForUser("charlie")
+
+	// Alice sends requests to Bob and Charlie
+	require.NoError(t, alice.AddFriendRequest("bob"))
+	require.NoError(t, alice.AddFriendRequest("charlie"))
+
+	// Check Alice's outgoing requests
+	outgoing, err := alice.GetOutgoingRequests()
+	require.NoError(t, err)
+	require.Len(t, outgoing, 2)
+	require.Contains(t, outgoing, types.UserID("bob"))
+	require.Contains(t, outgoing, types.UserID("charlie"))
+
+	// Check Bob's incoming requests
+	incoming, err := bob.GetIncomingRequests()
+	require.NoError(t, err)
+	require.Len(t, incoming, 1)
+	require.Contains(t, incoming, types.UserID("alice"))
+
+	// Bob accepts
+	require.NoError(t, bob.AcceptFriendRequest("alice"))
+
+	// Now Alice should only have one outgoing request
+	outgoing, err = alice.GetOutgoingRequests()
+	require.NoError(t, err)
+	require.Len(t, outgoing, 1)
+	require.Contains(t, outgoing, types.UserID("charlie"))
+
+	// Bob should have no incoming requests
+	incoming, err = bob.GetIncomingRequests()
+	require.NoError(t, err)
+	require.Empty(t, incoming)
+}
+
+func TestPebbleWriteOptions(t *testing.T) {
+	db := openDB(t)
+	defer db.Close()
+
+	// Test with NoSync for performance
+	friendship := friends.NewPebbleWithOptions(db, pebble.NoSync, nil)
+	alice := friendship.ForUser("alice")
+	bob := friendship.ForUser("bob")
+
+	require.NoError(t, alice.AddFriendRequest("bob"))
+	require.NoError(t, bob.AcceptFriendRequest("alice"))
+
+	isFriend, err := alice.IsFriends("bob")
+	require.NoError(t, err)
+	require.True(t, isFriend)
+}
+
+func TestPebbleConcurrency(t *testing.T) {
+	t.Parallel()
+	db := openDB(t)
+	defer db.Close()
+
+	friendship := friends.NewPebbleWithOptions(db, pebble.NoSync, nil)
+
+	// Create 50 users concurrently sending requests
+	const numUsers = 50
+	done := make(chan bool, numUsers)
+
+	for i := 0; i < numUsers; i++ {
+		go func(id int) {
+			defer func() { done <- true }()
+			userID := types.UserID(fmt.Sprintf("user%d", id))
+			user := friendship.ForUser(userID)
+
+			// Send requests to next 3 users
+			for j := 1; j <= 3; j++ {
+				targetID := types.UserID(fmt.Sprintf("user%d", (id+j)%numUsers))
+				_ = user.AddFriendRequest(targetID)
+			}
+
+			// Accept some incoming requests
+			incoming, _ := user.GetIncomingRequests()
+			for _, from := range incoming {
+				_ = user.AcceptFriendRequest(from)
+			}
+		}(i)
+	}
+
+	// Wait for all goroutines
+	for i := 0; i < numUsers; i++ {
+		<-done
+	}
+
+	// Verify no crashes and basic consistency
+	user0 := friendship.ForUser("user0")
+	count, err := user0.FriendsCount()
+	require.NoError(t, err)
+	t.Logf("User0 has %d friends", count)
+}
+
+func TestAnonymousMethodReplacement(t *testing.T) {
+	// Test that we can replace methods with custom implementations
+	friendship := friends.NewMem()
+
+	// Replace GetFriends with a custom implementation
+	originalGetFriends := friendship.GetFriends
+	callCount := 0
+	friendship.GetFriends = func(user types.UserID) ([]types.UserID, error) {
+		callCount++
+		return originalGetFriends(user)
+	}
+
+	alice := friendship.ForUser("alice")
+	bob := friendship.ForUser("bob")
+
+	require.NoError(t, alice.AddFriendRequest("bob"))
+	require.NoError(t, bob.AcceptFriendRequest("alice"))
+
+	_, err := alice.GetFriends()
+	require.NoError(t, err)
+	require.Equal(t, 1, callCount)
+
+	_, err = bob.GetFriends()
+	require.NoError(t, err)
+	require.Equal(t, 2, callCount)
 }

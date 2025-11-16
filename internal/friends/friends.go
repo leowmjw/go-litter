@@ -1,6 +1,8 @@
 package friends
 
 import (
+	"log/slog"
+
 	"github.com/cockroachdb/pebble/v2"
 
 	"golitter/internal/types"
@@ -19,12 +21,16 @@ type Relations struct {
 	RemoveOutgoingRequest func(from, to types.UserID) error
 	RemoveIncomingRequest func(from, to types.UserID) error
 	HasIncomingRequest    func(from, to types.UserID) (bool, error)
+	HasOutgoingRequest    func(from, to types.UserID) (bool, error)
+	ListOutgoingRequests  func(u types.UserID) ([]types.UserID, error)
+	ListIncomingRequests  func(u types.UserID) ([]types.UserID, error)
 }
 
 // Friendship provides general friendship operations that work with any user.
 // All methods require explicit userID parameters.
 type Friendship struct {
 	relations Relations
+	logger    *slog.Logger
 
 	// Business logic operations (explicit userID required)
 	AddFriendRequest    func(from, to types.UserID) error
@@ -34,6 +40,8 @@ type Friendship struct {
 	GetFriends          func(user types.UserID) ([]types.UserID, error)
 	IsFriends           func(a, b types.UserID) (bool, error)
 	FriendsCount        func(user types.UserID) (int, error)
+	GetOutgoingRequests func(user types.UserID) ([]types.UserID, error)
+	GetIncomingRequests func(user types.UserID) ([]types.UserID, error)
 
 	// Analytics operations (no userID needed)
 	TotalFriendships func() (int64, error)
@@ -46,8 +54,140 @@ type UserFriendship struct {
 	friendship *Friendship
 }
 
+// wireBusinessLogic wires up the business logic operations for a Friendship instance.
+// This function is shared between NewMem and NewPebble to avoid code duplication.
+func wireBusinessLogic(f *Friendship) {
+	if f.logger == nil {
+		f.logger = slog.Default()
+	}
+
+	f.AddFriendRequest = func(from, to types.UserID) error {
+		if from == to {
+			return &ValidationError{Op: "AddFriendRequest", From: from, To: to, Cause: ErrSelfFriendship}
+		}
+
+		hasOutgoing, err := f.relations.HasOutgoingRequest(from, to)
+		if err != nil {
+			f.logger.Error("failed to check outgoing request", "from", from, "to", to, "error", err)
+			return err
+		}
+		if hasOutgoing {
+			return &ValidationError{Op: "AddFriendRequest", From: from, To: to, Cause: ErrRequestAlreadyExists}
+		}
+
+		isFriends, err := f.relations.CheckRelation(from, to)
+		if err != nil {
+			f.logger.Error("failed to check relation", "from", from, "to", to, "error", err)
+			return err
+		}
+		if isFriends {
+			return &ValidationError{Op: "AddFriendRequest", From: from, To: to, Cause: ErrAlreadyFriends}
+		}
+
+		if err := f.relations.AddOutgoingRequest(from, to); err != nil {
+			f.logger.Error("failed to add outgoing request", "from", from, "to", to, "error", err)
+			return err
+		}
+		if err := f.relations.AddIncomingRequest(from, to); err != nil {
+			f.logger.Error("failed to add incoming request", "from", from, "to", to, "error", err)
+			_ = f.relations.RemoveOutgoingRequest(from, to)
+			return err
+		}
+
+		f.logger.Info("friend request sent", "from", from, "to", to)
+		return nil
+	}
+
+	f.CancelFriendRequest = func(from, to types.UserID) error {
+		if from == to {
+			return &ValidationError{Op: "CancelFriendRequest", From: from, To: to, Cause: ErrSelfFriendship}
+		}
+
+		if err := f.relations.RemoveOutgoingRequest(from, to); err != nil {
+			f.logger.Error("failed to remove outgoing request", "from", from, "to", to, "error", err)
+			return err
+		}
+		if err := f.relations.RemoveIncomingRequest(from, to); err != nil {
+			f.logger.Error("failed to remove incoming request", "from", from, "to", to, "error", err)
+			return err
+		}
+
+		f.logger.Info("friend request cancelled", "from", from, "to", to)
+		return nil
+	}
+
+	f.AcceptFriendRequest = func(from, to types.UserID) error {
+		if from == to {
+			return &ValidationError{Op: "AcceptFriendRequest", From: from, To: to, Cause: ErrSelfFriendship}
+		}
+
+		hasRequest, err := f.relations.HasIncomingRequest(from, to)
+		if err != nil {
+			f.logger.Error("failed to check incoming request", "from", from, "to", to, "error", err)
+			return err
+		}
+		if !hasRequest {
+			return &ValidationError{Op: "AcceptFriendRequest", From: from, To: to, Cause: ErrNoIncomingRequest}
+		}
+
+		if err := f.relations.RemoveIncomingRequest(from, to); err != nil {
+			f.logger.Error("failed to remove incoming request", "from", from, "to", to, "error", err)
+			return err
+		}
+		if err := f.relations.RemoveOutgoingRequest(from, to); err != nil {
+			f.logger.Error("failed to remove outgoing request", "from", from, "to", to, "error", err)
+			return err
+		}
+		if err := f.relations.AddRelation(from, to); err != nil {
+			f.logger.Error("failed to add relation", "from", from, "to", to, "error", err)
+			return err
+		}
+
+		f.logger.Info("friend request accepted", "from", from, "to", to)
+		return nil
+	}
+
+	f.Unfriend = func(a, b types.UserID) error {
+		if a == b {
+			return &ValidationError{Op: "Unfriend", From: a, To: b, Cause: ErrSelfFriendship}
+		}
+
+		exists, err := f.relations.CheckRelation(a, b)
+		if err != nil {
+			f.logger.Error("failed to check relation", "a", a, "b", b, "error", err)
+			return err
+		}
+		if !exists {
+			return &ValidationError{Op: "Unfriend", From: a, To: b, Cause: ErrNotFriends}
+		}
+
+		if err := f.relations.RemoveRelation(a, b); err != nil {
+			f.logger.Error("failed to remove relation", "a", a, "b", b, "error", err)
+			return err
+		}
+
+		f.logger.Info("unfriended", "a", a, "b", b)
+		return nil
+	}
+
+	f.GetFriends = f.relations.ListRelations
+	f.IsFriends = f.relations.CheckRelation
+	f.FriendsCount = f.relations.CountRelations
+	f.GetOutgoingRequests = f.relations.ListOutgoingRequests
+	f.GetIncomingRequests = f.relations.ListIncomingRequests
+
+	f.TotalFriendships = func() (int64, error) {
+		return 0, nil // TODO: implement if needed
+	}
+}
+
 // NewMem creates a new in-memory Friendship instance.
 func NewMem() *Friendship {
+	return NewMemWithLogger(nil)
+}
+
+// NewMemWithLogger creates a new in-memory Friendship instance with a custom logger.
+func NewMemWithLogger(logger *slog.Logger) *Friendship {
 	mem := newMemRelations()
 	relations := Relations{
 		AddRelation:           mem.addRelation,
@@ -60,69 +200,28 @@ func NewMem() *Friendship {
 		RemoveOutgoingRequest: mem.removeOutgoingRequest,
 		RemoveIncomingRequest: mem.removeIncomingRequest,
 		HasIncomingRequest:    mem.hasIncomingRequest,
+		HasOutgoingRequest:    mem.hasOutgoingRequest,
+		ListOutgoingRequests:  mem.listOutgoingRequests,
+		ListIncomingRequests:  mem.listIncomingRequests,
 	}
 
-	f := &Friendship{relations: relations}
-
-	// Wire business logic operations
-	f.AddFriendRequest = func(from, to types.UserID) error {
-		f.relations.AddOutgoingRequest(from, to)
-		f.relations.AddIncomingRequest(from, to)
-		return nil
-	}
-
-	f.CancelFriendRequest = func(from, to types.UserID) error {
-		f.relations.RemoveOutgoingRequest(from, to)
-		f.relations.RemoveIncomingRequest(from, to)
-		return nil
-	}
-
-	f.AcceptFriendRequest = func(from, to types.UserID) error {
-		// Only accept if there's an incoming request
-		hasRequest, err := f.relations.HasIncomingRequest(from, to)
-		if err != nil {
-			return err
-		}
-		if !hasRequest {
-			// No request to accept, just return (safe no-op)
-			return nil
-		}
-		// Remove from requests
-		f.relations.RemoveIncomingRequest(from, to)
-		f.relations.RemoveOutgoingRequest(from, to)
-		// Add bidirectional friendship
-		f.relations.AddRelation(from, to)
-		return nil
-	}
-
-	f.Unfriend = func(a, b types.UserID) error {
-		// Only remove if the relation exists
-		exists, err := f.relations.CheckRelation(a, b)
-		if err != nil {
-			return err
-		}
-		if !exists {
-			// Not friends, safe no-op
-			return nil
-		}
-		return f.relations.RemoveRelation(a, b)
-	}
-
-	f.GetFriends = f.relations.ListRelations
-	f.IsFriends = f.relations.CheckRelation
-	f.FriendsCount = f.relations.CountRelations
-
-	// Analytics (placeholder - can be implemented later)
-	f.TotalFriendships = func() (int64, error) {
-		return 0, nil // TODO: implement if needed
-	}
-
+	f := &Friendship{relations: relations, logger: logger}
+	wireBusinessLogic(f)
 	return f
 }
 
-// NewPebble creates a new Pebble-backed Friendship instance.
+// NewPebble creates a new Pebble-backed Friendship instance with default write options.
 func NewPebble(db *pebble.DB) *Friendship {
-	peb := newPebbleRelations(db)
+	return NewPebbleWithOptions(db, nil, nil)
+}
+
+// NewPebbleWithOptions creates a new Pebble-backed Friendship instance with custom options.
+func NewPebbleWithOptions(db *pebble.DB, writeOpts *pebble.WriteOptions, logger *slog.Logger) *Friendship {
+	if writeOpts == nil {
+		writeOpts = pebble.Sync
+	}
+
+	peb := newPebbleRelations(db, writeOpts)
 	relations := Relations{
 		AddRelation:           peb.addRelation,
 		RemoveRelation:        peb.removeRelation,
@@ -134,63 +233,13 @@ func NewPebble(db *pebble.DB) *Friendship {
 		RemoveOutgoingRequest: peb.removeOutgoingRequest,
 		RemoveIncomingRequest: peb.removeIncomingRequest,
 		HasIncomingRequest:    peb.hasIncomingRequest,
+		HasOutgoingRequest:    peb.hasOutgoingRequest,
+		ListOutgoingRequests:  peb.listOutgoingRequests,
+		ListIncomingRequests:  peb.listIncomingRequests,
 	}
 
-	f := &Friendship{relations: relations}
-
-	// Wire business logic operations (same as mem)
-	f.AddFriendRequest = func(from, to types.UserID) error {
-		f.relations.AddOutgoingRequest(from, to)
-		f.relations.AddIncomingRequest(from, to)
-		return nil
-	}
-
-	f.CancelFriendRequest = func(from, to types.UserID) error {
-		f.relations.RemoveOutgoingRequest(from, to)
-		f.relations.RemoveIncomingRequest(from, to)
-		return nil
-	}
-
-	f.AcceptFriendRequest = func(from, to types.UserID) error {
-		// Only accept if there's an incoming request
-		hasRequest, err := f.relations.HasIncomingRequest(from, to)
-		if err != nil {
-			return err
-		}
-		if !hasRequest {
-			// No request to accept, just return (safe no-op)
-			return nil
-		}
-		// Remove from requests
-		f.relations.RemoveIncomingRequest(from, to)
-		f.relations.RemoveOutgoingRequest(from, to)
-		// Add bidirectional friendship
-		f.relations.AddRelation(from, to)
-		return nil
-	}
-
-	f.Unfriend = func(a, b types.UserID) error {
-		// Only remove if the relation exists
-		exists, err := f.relations.CheckRelation(a, b)
-		if err != nil {
-			return err
-		}
-		if !exists {
-			// Not friends, safe no-op
-			return nil
-		}
-		return f.relations.RemoveRelation(a, b)
-	}
-
-	f.GetFriends = f.relations.ListRelations
-	f.IsFriends = f.relations.CheckRelation
-	f.FriendsCount = f.relations.CountRelations
-
-	// Analytics (placeholder)
-	f.TotalFriendships = func() (int64, error) {
-		return 0, nil // TODO: implement if needed
-	}
-
+	f := &Friendship{relations: relations, logger: logger}
+	wireBusinessLogic(f)
 	return f
 }
 
@@ -236,4 +285,14 @@ func (uf *UserFriendship) IsFriends(friend types.UserID) (bool, error) {
 // FriendsCount returns the number of friends for the scoped user.
 func (uf *UserFriendship) FriendsCount() (int, error) {
 	return uf.friendship.FriendsCount(uf.userID)
+}
+
+// GetOutgoingRequests returns all outgoing friend requests for the scoped user.
+func (uf *UserFriendship) GetOutgoingRequests() ([]types.UserID, error) {
+	return uf.friendship.GetOutgoingRequests(uf.userID)
+}
+
+// GetIncomingRequests returns all incoming friend requests for the scoped user.
+func (uf *UserFriendship) GetIncomingRequests() ([]types.UserID, error) {
+	return uf.friendship.GetIncomingRequests(uf.userID)
 }
