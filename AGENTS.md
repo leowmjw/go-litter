@@ -17,8 +17,8 @@
 - Whole system should be fully testable standalone with Go binary
 - Use modern Go capabilities (when needed): generics, structured log, built-in http
 routing, testing/synctest
-- Use techniques like first class anonymous function as method replacement, synctest
- to ensure all things are deterministic
+- Prefer concrete structs with first-class function fields and anonymous function method replacement; avoid Go interfaces unless a dependency or protocol boundary truly requires one
+- Use function replacement and `testing/synctest` to keep behavior deterministic
 
 ## Testing
 
@@ -39,10 +39,11 @@ routing, testing/synctest
 
 ## Specification (MVP)
 
-- Follow PRD.md for suggested details but it MUST NOT override what stated here
-- This is a workshop with many examples (see EXAMPLES)  + final tutorial --> https://redplanetlabs.com/docs/~/tutorial1.html#gsc.tab=0; start with cmd/session-1
-- Once finish all the examples, then do cmd/quick-tutorial
-- Ask if anything unsure or contradictory
+- Follow `PRD.md` for product behavior and `TECHSPEC.md` for implementation choices and milestone order; neither overrides this file
+- `EXAMPLE/` is the canonical Java reference imported from `redplanetlabs/rama-demo-gallery`; use its `README.md`, `src/main/java/`, and `src/test/java/`
+- Port the six gallery modules in the session order defined by PRD.md, starting with `cmd/session-1`
+- Once all gallery examples are complete, implement `cmd/quick-tutorial` from the six-page Rama tutorial beginning at https://redplanetlabs.com/docs/~/tutorial1.html
+- Ask if anything is unsure or contradictory
 - Use mise to launch the workshops for all sessions
 
 ## Specification (Advanced)

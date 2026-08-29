@@ -8,6 +8,9 @@
 *.so
 *.dylib
 
+# Ignore binary
+bin/
+
 # Test binary, built with `go test -c`
 *.test
 
@@ -23,6 +26,9 @@ go.work.sum
 
 # env file
 .env
+
+# Ignore Direnv
+.envrc*
 
 # Ignore generated app folder
 app
@@ -41,3 +47,7 @@ target
 
 # Ignore Mise
 mise.local.toml
+
+# Ignore Archive
+ARCHIVE
+
