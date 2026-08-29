@@ -1,0 +1,15 @@
+[tools]
+go = "1.27.0"
+overmind = "latest"
+air = "latest"
+victoria-metrics = "latest"
+
+[env]
+_ = { 
+	path = ["./bin", "~/go/bin"], 
+	file = ".env",
+}
+# mise = { file = ".env" }
+
+[tasks]
+dev = { run = "make" }

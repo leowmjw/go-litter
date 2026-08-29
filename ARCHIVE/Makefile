@@ -1,8 +1,9 @@
 run:
+	@go version
 	@go run *.go
 
 test:
-	@gotest -v -race ./...
+	@gotest -v ./...
 
 setup:
 	@eval "$(mise activate zsh)"
