@@ -4,7 +4,7 @@
 
 This document defines implementation choices and delivery order. `AGENTS.md` is mandatory and takes precedence; `PRD.md` defines product behavior and acceptance requirements.
 
-The standalone profile and all unit/integration tests MUST run independently as a Go binary without cloud services, containers, MinIO, or a separately running Temporal service. The optional Temporal development profile still starts the sibling Temporal process required by `AGENTS.md`.
+The standalone dataflow profile and all unit/integration tests MUST run without cloud services, containers, MinIO, or a separately running Temporal service. The complete runnable MVP additionally requires the local standalone Temporal profile and local end-to-end coverage against that sibling process.
 
 ## Architecture Principles
 
@@ -26,18 +26,18 @@ The standalone profile and all unit/integration tests MUST run independently as 
 - No network dependency except loopback listeners started by the binary itself.
 - Used by workshops, unit tests, integration tests, and fast local development.
 
-### Temporal Development
+### Local Standalone Temporal
 
-- Same dataflow workers and storage adapters as standalone mode.
-- Temporal Workflows provide module lifecycle, worker assignment, liveness, batch scheduling, recovery, and updates.
+- Same single-host dataflow workers and local Pebble adapter as standalone mode.
+- A local `temporal server start-dev` process provides module lifecycle, worker assignment, liveness, batch scheduling, recovery, and updates; no managed Temporal service is used.
 - Launched with the per-session `mise`/`overmind` setup required by `AGENTS.md`.
-- Temporal Go testsuite remains the default automated Workflow test environment.
+- Temporal Go testsuite remains the process-independent unit/integration Workflow environment.
 
-### End-to-End
+### Local End-to-End
 
-- Temporal Test Server or development server plus independently running dataflow workers.
+- Local standalone Temporal server plus independently running dataflow workers and Pebble.
+- This profile starts only after unit and integration tests pass.
 - Local object storage may be introduced only in future scale-out tests.
-- This profile is not required until unit and integration tests pass.
 
 ## Storage Decisions
 
@@ -190,6 +190,39 @@ Temporal does not own:
 
 Workflow tests MUST use the Temporal Go testsuite and `RegisterDelayedCallback` for 30-second batch windows, one-minute liveness checks, worker loss, retries, and version transitions.
 
+## MVP Completion Definition
+
+The MVP is the complete workshop, not merely a working storage/runtime foundation. It is complete only when:
+
+- All six Java gallery examples and their observable tests are ported and passing in `cmd/session-1` through `cmd/session-6`.
+- `cmd/quick-tutorial` implements and tests Tutorial 1–6 in order, culminating in the complete RamaSpace acceptance suite.
+- Every session and the quick tutorial can run as a single-host standalone deployment using local Pebble for authoritative depot/PState storage.
+- Every session and the quick tutorial can run with a local standalone Temporal server providing lifecycle, scheduling, liveness, recovery, and module-version orchestration.
+- Unit and integration suites remain independent of external processes by using in-memory/Pebble stores and the Temporal Go testsuite.
+- Local full end-to-end tests may start the standalone Temporal server; cloud services, managed Temporal, MinIO, R2, S3, and distributed storage are not MVP dependencies.
+- All cumulative test, coverage, race, static-analysis, build, and mise launch gates pass.
+
+## Current Checkpoint
+
+The repository currently contains a working foundation and Session 1 slice, not completed M0–M2:
+
+- Implemented: in-memory/Pebble storage, ordered depots, stream processing, ProfileModule, replay/rebuild, standalone HTTP, function-field dependency replacement, and Temporal lifecycle tests.
+- Still required to close the foundation: typed identities, wiring the running worker to local Temporal, Pebble snapshot support, and crash-boundary durability tests.
+- Sessions 2–6, the microbatch engine, `cmd/quick-tutorial`, and RamaSpace are not implemented.
+
+## Next Checkpoint — Foundation Closure + Microbatch + Session 2
+
+The next implementation checkpoint MUST complete all of the following before Session 3 begins:
+
+1. Wire Session 1 to the local standalone Temporal server for worker registration, heartbeat, one-minute liveness detection, and recovery of unacknowledged work.
+2. Add Pebble snapshots and crash-boundary tests for durable append, atomic PState/checkpoint commit, reopen, replay, and deduplication.
+3. Implement the configurable 30-second microbatch scheduler using deterministic virtual time.
+4. Extend atomic commits to coordinated high-watermarks for every consumed depot partition and exactly-once visible batch effects.
+5. Implement compound aggregation, bounded subindexed scans, server-side reductions, and reusable query-topology execution needed by TimeSeriesModule.
+6. Port Session 2 and every assertion from `TimeSeriesModuleTest`.
+7. Add `cmd/session-2`, `Procfile.session-2`, `cmd/session-2/.air.toml`, and its mise run/dev tasks.
+8. Pass unit, integration, coverage, race, vet, build, and local standalone Temporal end-to-end checks.
+
 ## MVP Roadmap
 
 Milestones are sequential. A milestone is complete only when its exit criteria pass; creating files or demonstrating a happy path is not sufficient.
@@ -202,6 +235,7 @@ Every milestone also has these cumulative gates:
 - Temporal long-running behavior uses the testsuite and `RegisterDelayedCallback`.
 - Tests use no wall-clock sleeps.
 - The milestone's build, tests, coverage, and static analysis run through `mise`.
+- Once unit/integration gates pass, every runnable session also passes a local full end-to-end check against the standalone Temporal server and Pebble.
 
 ### M0 — Contracts and Deterministic Harness
 
@@ -229,7 +263,8 @@ Build:
 - Stream source/operation/PState pipeline.
 - Acknowledged append and record-level retry policy.
 - Point and bounded range query primitives.
-- Temporal module lifecycle skeleton tested entirely with the testsuite.
+- Temporal module lifecycle Workflow tested entirely with the testsuite.
+- Runtime integration that registers the Session 1 worker with the local standalone Temporal server, heartbeats, detects liveness loss, and recovers unacknowledged work.
 - `ProfileModule` workshop in `cmd/session-1`.
 - `Procfile.session-1`, `cmd/session-1/.air.toml`, and `mise run session-1:dev`.
 
@@ -239,7 +274,7 @@ Exit criteria:
 - Same-key events preserve order under concurrent appends.
 - An acknowledged append does not return before its visible PState commit.
 - A simulated worker failure retries only unacknowledged stream work.
-- The session runs in standalone and Temporal development profiles.
+- Session 1 passes both single-process standalone tests and a local full end-to-end run with Pebble plus the standalone Temporal server.
 
 ### M2 — Durable Local Storage and Restart Recovery
 
@@ -259,23 +294,39 @@ Exit criteria:
 - A PState can be rebuilt from its depot and produces the same query results.
 - The standalone binary remains fully functional with no Temporal or object-store process.
 
-### M3 — Microbatch Runtime and Sessions 2–4
+### M3A — Microbatch Runtime and Session 2
+
+This is the immediate next checkpoint after the remaining M0–M2 foundation gaps are closed.
 
 Build:
 
 - Configurable 30-second microbatch scheduler with virtual-time tests.
 - Coordinated input high-watermarks across local task partitions.
 - Exactly-once commit/deduplication protocol.
-- Compound aggregation, sub-batches, global partition/state, query topology, and server-side reductions required by the examples.
-- `TimeSeriesModule`, `TopUsersModule`, and `BankTransferModule` workshops.
-- Per-session Procfiles, air configuration, and `mise run session-N:dev` tasks for sessions 2–4.
+- Compound aggregation, bounded subindexed scans, server-side reductions, and query topology primitives.
+- `TimeSeriesModule` workshop and Session 2 dev tooling.
 
 Exit criteria:
 
-- All observable assertions from the three upstream Java test classes are ported.
+- Every observable assertion from `TimeSeriesModuleTest` is ported and passing.
 - Failure before commit replays the batch; failure after commit does not duplicate state.
+- Minute, hour, day, and 30-day aggregates and optimized range queries match the Java reference.
+- Session 2 passes standalone Pebble, Temporal testsuite, and local standalone Temporal end-to-end profiles.
+
+### M3B — Sessions 3–4
+
+Build:
+
+- Sub-batches, two-stage aggregation, global partition/state, and monotonic top-N operations for `TopUsersModule`.
+- Conditional cross-partition updates and transfer-ID idempotency for `BankTransferModule`.
+- Per-session Procfiles, air configuration, and mise run/dev tasks for Sessions 3–4.
+
+Exit criteria:
+
+- Every observable assertion from `TopUsersModuleTest` and `BankTransferModuleTest` is ported and passing.
 - Range and aggregate queries are bounded and do not load unbounded PStates into clients.
 - Bank transfer invariants hold under retry and concurrent unrelated partitions.
+- Sessions 3 and 4 pass standalone Pebble, Temporal testsuite, and local standalone Temporal end-to-end profiles.
 
 ### M4 — External I/O, Versions, and Sessions 5–6
 
@@ -294,12 +345,14 @@ Exit criteria:
 - Resource startup, cancellation, retry, and shutdown are asserted.
 - Old stored records migrate exactly once and new records use the new schema.
 - Old and new compatible worker versions can coexist during the update test.
+- Sessions 5 and 6 pass standalone Pebble, Temporal testsuite, and local standalone Temporal end-to-end profiles.
 
 ### M5 — Quick Tutorial and RamaSpace
 
 Build:
 
-- `cmd/quick-tutorial` in the six tutorial stages required by `PRD.md`.
+- Confirm Sessions 1–6 and all Java-reference behavior pass before starting the quick tutorial.
+- `cmd/quick-tutorial` implements Tutorial 1–6 in order, with independently testable stages for first module, depots/ETLs/PStates, partitioning, dataflow programming, stream/microbatch semantics, and RamaSpace.
 - Quick-tutorial Procfile, air configuration, and `mise run quick-tutorial:dev` task.
 - Complete RamaSpace users, profiles, friendships, posts, analytics, and resolve-posts query.
 - Race-free registration with the client registration UUID/idempotency token persisted only for the winning attempt.
@@ -307,12 +360,13 @@ Build:
 
 Exit criteria:
 
+- Every Tutorial 1–5 stage has deterministic tests proving the required concepts from `PRD.md`.
 - Every RamaSpace minimum acceptance case in `PRD.md` passes.
 - Concurrent duplicate registration attempts produce one winner, and each client can determine its result from its registration UUID.
 - Twenty-four posts page as 20 plus 4 and resolve author profile data.
 - Friendship request/accept/cancel/remove operations preserve all bidirectional indexes.
 - Dead-worker recovery replays only unacknowledged work.
-- Standalone and Temporal testsuite paths produce equivalent application results.
+- The quick tutorial produces equivalent results in standalone Pebble, Temporal testsuite, and local standalone Temporal end-to-end profiles.
 
 ### M6 — MVP Hardening and Release Gate
 
@@ -329,24 +383,29 @@ Exit criteria:
 - Unit and integration tests pass with at least 80% coverage for new code.
 - `go test -race ./...`, static analysis, and build pass through `mise`.
 - No unit or integration test requires an external process.
-- Each session and quick tutorial launches through its documented `mise` command.
-- End-to-end CI/CD remains disabled until this gate is satisfied.
+- All six gallery sessions and every Java-reference behavior pass.
+- Tutorial 1–6 and the complete RamaSpace acceptance suite pass.
+- Each session and quick tutorial launches through its documented mise command with local Pebble and the standalone Temporal server.
+- Local full end-to-end tests pass; automated production CI/CD remains advanced work.
 
 ## MVP Scope
 
 Included:
 
 - Single-host standalone runtime with multiple logical tasks.
-- In-memory and Pebble storage profiles.
-- Stream and 30-second microbatch semantics.
-- Deterministic partitioning, replay, exactly-once local microbatch effects, migrations, and module versions.
-- Temporal control-plane behavior tested in-process.
-- Six gallery sessions and the final quick tutorial.
+- In-memory storage for unit/integration conformance and local Pebble as the authoritative runnable storage profile.
+- Local standalone Temporal server as the runnable orchestration/control plane, plus the in-process Temporal testsuite for unit/integration coverage.
+- Stream and configurable 30-second microbatch semantics.
+- Deterministic partitioning, replay, exactly-once local microbatch effects, snapshots, migrations, and module versions.
+- All six gallery sessions with every Java-reference behavior represented by passing Go tests.
+- The complete Tutorial 1–6 quick tutorial and full RamaSpace acceptance suite.
+- Local full end-to-end coverage proving each session and the quick tutorial with Pebble and standalone Temporal.
 
 Excluded:
 
 - Online task-count changes and resharding.
-- Cross-host atomic transactions.
+- Multi-host worker deployment and cross-host atomic transactions.
+- Managed Temporal or any cloud control-plane dependency.
 - Cloud object storage.
 - Multi-region replication.
 - Automated production deployment.

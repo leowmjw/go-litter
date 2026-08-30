@@ -41,10 +41,11 @@ routing, testing/synctest
 
 - Follow `PRD.md` for product behavior and `TECHSPEC.md` for implementation choices and milestone order; neither overrides this file
 - `EXAMPLE/` is the canonical Java reference imported from `redplanetlabs/rama-demo-gallery`; use its `README.md`, `src/main/java/`, and `src/test/java/`
-- Port the six gallery modules in the session order defined by PRD.md, starting with `cmd/session-1`
-- Once all gallery examples are complete, implement `cmd/quick-tutorial` from the six-page Rama tutorial beginning at https://redplanetlabs.com/docs/~/tutorial1.html
+- MVP is not complete until all six gallery modules and their test behavior pass in `cmd/session-1` through `cmd/session-6`, followed by the complete Tutorial 1–6/RamaSpace implementation in `cmd/quick-tutorial`
+- The MVP deployment target is single-host standalone: local Pebble is authoritative storage and a local standalone Temporal server is the orchestration/control plane; no cloud or object-storage backend is required
+- Unit and integration tests remain process-independent and use in-memory/Pebble plus the Temporal testsuite; only local full end-to-end tests may start the standalone Temporal server
 - Ask if anything is unsure or contradictory
-- Use mise to launch the workshops for all sessions
+- Use mise to launch every workshop session and the quick tutorial
 
 ## Specification (Advanced)
 - Finally CI/CD will use End-to-End Tests
@@ -52,17 +53,67 @@ routing, testing/synctest
 
 ## Implementation Status & Learnings
 
-<TODO>
+### Current checkpoint — gallery modules complete, commands/tutorial pending
 
-### Overmind + air per-session (example)  convention
+Completed and verified:
+
+- Typed module/depot/PState/topology identities, deterministic power-of-two partitioning, ordered depots, acknowledged append/retry, contiguous checkpoints, replay, and PState rebuild
+- In-memory conformance storage, durable Pebble storage/reopen and snapshot support, stream and microbatch runtimes, and exactly-once mutation/checkpoint commits
+- All six gallery module packages and deterministic behavior tests: Profile, TimeSeries, TopUsers, BankTransfer, REST integration, and MusicCatalog migration
+- Reusable Temporal lifecycle control-plane helper with heartbeat/liveness workflow; Sessions 1 and 2 are wired to it
+- Concrete structs with replaceable function fields; no project-defined interfaces
+- `go test -race ./...`, `go vet ./...`, and `go build ./...` pass at this checkpoint
+- Pebble is pinned to `v2.1.6`; Go 1.27 requires the pinned `cockroachdb/swiss` compatibility commit used by Pebble `v2.1.7`
+
+Remaining work, which may proceed in parallel:
+
+1. Session 3–6 standalone commands, Temporal wiring, Procfiles, air configs, and mise tasks
+2. Quick Tutorial 1–5 progression and Tutorial 6 RamaSpace acceptance suite
+3. Process/crash-boundary durability tests for acknowledged appends and exactly-once commits
+4. Standalone Temporal end-to-end tests, current coverage measurement, and final MVP hardening/release gate
+
+### MVP done condition
+
+- Every Java gallery behavior is represented by passing deterministic Go tests for all six sessions
+- Tutorial 1–6 and the full RamaSpace acceptance suite pass
+- Every session and quick tutorial runs standalone with local Pebble and under the local standalone Temporal control plane
+- Unit/integration tests require no external process; local full end-to-end tests start only the local Temporal server
+- All new code meets the coverage rule and `mise run check` passes
+
+### Overmind + air per-session convention
 
 - **One Procfile per session** at workspace root: `Procfile.session-1`, `Procfile.session-2`, …
-- **Three standard processes** per session Procfile:
+- **Two standard processes** per session Procfile:
   - `temporal`: `temporal server start-dev --db-filename .temporal/temporal.db --metrics-port 8077`
   - `app`: `air -c cmd/session-N/.air.toml`
 - **One `.air.toml` per session** at `cmd/session-N/.air.toml`; build output goes to `.air-session-N/`
 - **mise task** `session-N:dev` runs `overmind start -f Procfile.session-N`
 - `.temporal/` and `.air-session-*/` are git-ignored
 
+## Concise learnings and parallel work bundles
+
+The foundation is in place for multiple agents to work in parallel. What has landed:
+
+- **Storage layer**: in-memory conformance store and durable Pebble store with module/state/partition keying, snapshots, replay, and rebuild.
+- **Partitioning scheme**: power-of-two logical tasks, big-endian byte partition keys, and a `partition.New` constructor.
+- **Runtime primitives**: `internal/stream` for per-record stream topologies and `internal/microbatch` for multi-source batched topologies with deterministic commit and exactly-once PState updates.
+- **Control plane**: `internal/controlplane` lifecycle workflow and `internal/sessionapp/controlplane.go` reusable `StartControlPlane` helper.
+- **All six gallery modules**: `profile`, `timeseries`, `topusers`, `banktransfer`, `restapi`, `musiccatalog` have deterministic Go tests matching the Java reference behavior.
+- **Build/test gates**: `go build ./...`, `go vet ./...`, and `go test -race ./...` pass.
+
+Independent tracks that can be picked up in parallel:
+
+1. **Session 3–6 commands and dev tooling** (`cmd/session-3` through `cmd/session-6`, `Procfile.session-N`, `cmd/session-N/.air.toml`, and `mise` `session-N:dev`/`session-N:run`). Use the existing module package and `sessionapp.StartControlPlane`; follow the Session 2 pattern. No new runtime work is required.
+2. **Quick tutorial stages 1–6** (`cmd/quick-tutorial`). This is a learning progression using the same runtime; it can be implemented and tested against `EXAMPLE` tutorial reference independently of the gallery commands.
+3. **Pebble crash-boundary and snapshot tests** (`internal/storage` and `internal/microbatch/runtime_test.go`). Add durable-reopen tests that verify acknowledged records are not lost and committed effects are not duplicated across process restarts.
+4. **Temporal end-to-end and `mise` hardening**: add tests that start the standalone Temporal test server for Session 1 and Session 2, wire `mise run check` to include end-to-end where appropriate, and bring coverage back above the 80% rule.
+
+No hard blockers remain. The design cautions below do not block the parallel tracks.
+
+## Design issues to revisit later
+
+- `internal/topusers` recomputes the global top-spending list by scanning every `UserTotalSpend` partition. Replace this with a true global-partition aggregation before distributed/multi-worker execution.
+- `internal/banktransfer.GetFunds` returns `int`; change balances and public APIs to `int64` before targeting 32-bit platforms or very large balances.
+- The fixed `1<<20` limits in TimeSeries, TopUsers, BankTransfer, and MusicCatalog scans require pagination or streaming cursors for indexes that may exceed one million entries.
 
 

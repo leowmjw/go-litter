@@ -5,11 +5,18 @@ air = "latest"
 victoria-metrics = "latest"
 
 [env]
-_ = { 
-	path = ["./bin", "~/go/bin"], 
+CGO_ENABLED = "0"
+_ = {
+	path = ["./bin", "~/go/bin"],
 	file = ".env",
 }
-# mise = { file = ".env" }
 
 [tasks]
-dev = { run = "make" }
+dev = { run = "mise run session-1:run" }
+test = { run = "go test ./..." }
+coverage = { run = "go test -coverprofile=.coverage.out ./... && go tool cover -func=.coverage.out" }
+check = { run = "go test -race ./... && go vet ./... && go build ./..." }
+"session-1:run" = { run = "go run ./cmd/session-1" }
+"session-1:dev" = { run = "overmind start -f Procfile.session-1" }
+"session-2:run" = { run = "go run ./cmd/session-2" }
+"session-2:dev" = { run = "overmind start -f Procfile.session-2" }
