@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"math"
 	"net"
 	"net/http"
 	"os"
@@ -161,7 +160,7 @@ func RunSession2(ctx context.Context, config Session2Config) (runErr error) {
 	if config.Interval <= 0 {
 		return errors.New("interval must be positive")
 	}
-	if config.Tasks > math.MaxUint32 {
+	if config.Tasks > uint(^uint32(0)) {
 		return fmt.Errorf("task count exceeds uint32: %d", config.Tasks)
 	}
 
@@ -198,21 +197,6 @@ func RunSession2(ctx context.Context, config Session2Config) (runErr error) {
 		defer func() { runErr = errors.Join(runErr, controlCleanup()) }()
 	}
 
-	go func() {
-		ticker := time.NewTicker(config.Interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if _, err := module.AdvanceAll(ctx); err != nil {
-					slog.Error("advance failed", "error", err)
-				}
-			}
-		}
-	}()
-
 	listener, err := net.Listen("tcp", config.Address)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
@@ -224,6 +208,26 @@ func RunSession2(ctx context.Context, config Session2Config) (runErr error) {
 		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       time.Minute,
 	}
+	advanceErrors := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(config.Interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if _, err := module.AdvanceAll(ctx); err != nil {
+					slog.Error("advance failed", "error", err)
+					select {
+					case advanceErrors <- err:
+					default:
+					}
+					return
+				}
+			}
+		}
+	}()
 	slog.Info("session-2 ready", "address", listener.Addr().String(), "storage", map[bool]string{true: "memory", false: "pebble"}[config.Memory], "temporal", controlErrors != nil)
 	serveErr := make(chan error, 1)
 	go func() {
@@ -239,6 +243,8 @@ func RunSession2(ctx context.Context, config Session2Config) (runErr error) {
 	case err := <-serveErr:
 		runErr = err
 	case err := <-controlErrors:
+		runErr = err
+	case err := <-advanceErrors:
 		runErr = err
 	}
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
