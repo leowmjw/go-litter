@@ -1,0 +1,81 @@
+# Session 4 — BankTransferModule  (🔴 weakest fit for Numaflow)
+#
+# Rama concepts: exactly-once microbatch effects; idempotency by transferId;
+# conditional debit based on available funds; CROSS-PARTITION transfer (debit
+# account A, credit account B atomically); consistent outgoing/incoming transfer
+# indexes for both success and failure; balance preserved when a transfer fails.
+#
+# Why Numaflow alone cannot do this:
+#   - No distributed / multi-key atomic transaction across partitions.
+#   - No conditional read-modify-write on keyed balance state.
+#   - Ordering across partitions is not guaranteed.
+#
+# Division of labour:
+#   - Numaflow = durable ingest of transfer requests + dedup fan-out + emit
+#     terminal results to indexes. It is a transport + trigger, not the executor.
+#   - Temporal = the actual transfer SAGA: reserve/debit source, credit dest,
+#     compensate on failure, all keyed by transferId for idempotency.
+#   - State service = account balances + transfer indexes (PStates).
+#
+# Flow: request -> dedup(map) -> hand-off UDSink starts/creates a Temporal
+# workflow (idempotent by transferId). The workflow performs the cross-partition
+# debit/credit via the State service CAS ops and writes both indexes. A completion
+# event is published back so the pipeline (and any waiting client) can observe the
+# terminal state.
+---
+apiVersion: numaflow.numaproj.io/v1alpha1
+kind: Pipeline
+metadata:
+  name: banktransfer
+spec:
+  vertices:
+    - name: transfers-in
+      source:
+        kafka:
+          brokers: ["kafka:9092"]
+          topic: transferRequests
+          consumerGroup: banktransfer
+        transformer:
+          container:
+            image: ghcr.io/rama-workshop/envelope-transformer:latest
+
+    - name: dedup
+      # Map UDF: drops transferIds already terminal (idempotency), tags "new".
+      udf:
+        container:
+          image: ghcr.io/rama-workshop/session4-dedup:latest
+          env:
+            - name: STATE_STORE_ADDR
+              value: stated:4317
+      partitions: 4 # keyed by transferId
+
+    - name: start-transfer-saga
+      # UDSink: signals-with-start a Temporal transfer workflow (workflowId =
+      # "transfer-"+transferId => idempotent). The saga owns cross-partition
+      # atomicity; the sink returns once the workflow is durably started.
+      sink:
+        udsink:
+          container:
+            image: ghcr.io/rama-workshop/session4-saga-starter:latest
+            env:
+              - name: TEMPORAL_HOSTPORT
+                value: temporal:7233
+              - name: TEMPORAL_TASK_QUEUE
+                value: banktransfer-tx
+
+  edges:
+    - from: transfers-in
+      to: dedup
+    - from: dedup
+      to: start-transfer-saga
+      conditions:
+        tags:
+          operator: or
+          values: ["new"]
+#
+# The Temporal workflow (specified in TECHSPEC, NOT implemented) does:
+#   1. Load source balance (State service), conditional debit if funds available.
+#   2. Credit destination balance.
+#   3. Write outgoing + incoming transfer index entries (success or failure).
+#   4. On any failure after debit: compensate (credit back), record failed status,
+#      preserve balances. Exactly-once via transferId idempotency keys.

@@ -1,0 +1,129 @@
+# Session 2 — TimeSeriesModule
+#
+# Rama concepts: microbatch aggregation of URL render latencies; typed combiners
+# (count, total, latest, min, max); minute/hour/day/30-day rollups; sorted,
+# subindexed range queries.
+#
+# Numaflow covers (🟢 strong fit for the aggregation):
+#   - reduce UDF with FIXED windows == the minute/hour/day/30-day rollups
+#   - keyed windows (key = url) == per-URL aggregation
+#   - chained reduce == coarser granularities consume finer aggregates
+#   - reduce accumulator == the typed combiner (count/total/latest/min/max)
+#   - exactly-once on unbounded source == committed batch effect
+#
+# Go/Temporal covers (🔴 the query gap):
+#   - sorted range-query index (map[url]sorted-map[bucket]agg) -> State service
+#   - range queries "min..max bucket" -> Query service / ServingPipeline
+#
+# NOTE: reduce `storage` (PVC) below is window checkpoint replay only, NOT the
+# queryable store. The queryable index is the UDSink target (State service).
+---
+apiVersion: numaflow.numaproj.io/v1alpha1
+kind: Pipeline
+metadata:
+  name: timeseries
+spec:
+  vertices:
+    - name: latencies-in
+      source:
+        kafka:
+          brokers: ["kafka:9092"]
+          topic: renderLatencies
+          consumerGroup: timeseries
+        transformer:
+          # event-time extraction: aggregation is by EVENT time, not ingest time.
+          builtin:
+            name: eventTimeExtractor
+            kwargs:
+              expression: 'json(payload).eventTime'
+              format: unix_ms
+
+    - name: rollup-minute
+      udf:
+        container:
+          image: ghcr.io/rama-workshop/session2-combiner:latest
+        groupBy:
+          window:
+            fixed:
+              length: 60s
+          keyed: true # key = url
+          storage:
+            persistentVolumeClaim:
+              volumeSize: 5Gi
+              accessMode: ReadWriteOncePod
+      partitions: 3
+
+    - name: rollup-hour
+      udf:
+        container:
+          image: ghcr.io/rama-workshop/session2-combiner:latest
+        groupBy:
+          window:
+            fixed:
+              length: 3600s
+          keyed: true
+          storage:
+            persistentVolumeClaim:
+              volumeSize: 5Gi
+              accessMode: ReadWriteOncePod
+      partitions: 3
+
+    - name: rollup-day
+      udf:
+        container:
+          image: ghcr.io/rama-workshop/session2-combiner:latest
+        groupBy:
+          window:
+            fixed:
+              length: 86400s
+          keyed: true
+          storage:
+            persistentVolumeClaim:
+              volumeSize: 5Gi
+              accessMode: ReadWriteOncePod
+      partitions: 3
+
+    - name: rollup-30day
+      udf:
+        container:
+          image: ghcr.io/rama-workshop/session2-combiner:latest
+        groupBy:
+          window:
+            fixed:
+              length: 2592000s
+          keyed: true
+          storage:
+            persistentVolumeClaim:
+              volumeSize: 5Gi
+              accessMode: ReadWriteOncePod
+      partitions: 1
+
+    - name: index-writer
+      # UDSink: writes each granularity's aggregate into the sorted range index
+      # in the State service: map[url] -> sorted-map[(granularity,bucketStart)] -> agg
+      sink:
+        udsink:
+          container:
+            image: ghcr.io/rama-workshop/session2-index-writer:latest
+            env:
+              - name: STATE_STORE_ADDR
+                value: stated:4317
+
+  edges:
+    - from: latencies-in
+      to: rollup-minute
+    # fan minute aggregates into BOTH the index and coarser rollups
+    - from: rollup-minute
+      to: index-writer
+    - from: rollup-minute
+      to: rollup-hour
+    - from: rollup-hour
+      to: index-writer
+    - from: rollup-hour
+      to: rollup-day
+    - from: rollup-day
+      to: index-writer
+    - from: rollup-day
+      to: rollup-30day
+    - from: rollup-30day
+      to: index-writer

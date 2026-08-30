@@ -15,7 +15,7 @@ _ = {
 dev = { run = "mise run session-1:run" }
 test = { run = "go test ./..." }
 coverage = { run = "go test -coverprofile=.coverage.out -coverpkg=./internal/... ./... && go tool cover -func=.coverage.out" }
-coverage-gate = { run = "go test -coverprofile=.coverage.out -coverpkg=./internal/... ./... && go tool cover -func=.coverage.out | awk '/^total:/{ sub(/%/, \"\", $NF); if ($NF < 80) { print \"coverage below 80%: \" $NF \"%\"; exit 1 } }'" }
+coverage-gate = { run = "go test -coverprofile=.coverage.out -coverpkg=./internal/... ./... && go tool cover -func=.coverage.out | awk '/^total:/{ sub(/%/, "", $NF); if ($NF < 80) { print "coverage below 80%: " $NF "%"; exit 1 } }'" }
 check = { run = "go test -race ./... && go vet ./... && go build ./..." }
 "session-1:run" = { run = "go run ./cmd/session-1" }
 "session-1:dev" = { run = "overmind start -f Procfile.session-1" }
@@ -23,3 +23,12 @@ check = { run = "go test -race ./... && go vet ./... && go build ./..." }
 "session-2:dev" = { run = "overmind start -f Procfile.session-2" }
 "quick-tutorial:run" = { run = "go run ./cmd/quick-tutorial" }
 "quick-tutorial:dev" = { run = "overmind start -f Procfile.quick-tutorial" }
+
+# --- NUMAFLOW hybrid (see NUMAFLOW/README.md) ------------------------------
+# Local Go control/state services (Temporal + stated + worker + queryd).
+"numaflow:dev" = { run = "overmind start -f Procfile.numaflow", description = "Run the hybrid Go services (temporal, stated, worker, queryd)" }
+# Apply / remove the Numaflow pipeline manifests against the current kube context.
+"numaflow:apply" = { run = "kubectl apply -f NUMAFLOW/pipelines/", description = "Apply all Numaflow pipeline + serving manifests" }
+"numaflow:delete" = { run = "kubectl delete -f NUMAFLOW/pipelines/ --ignore-not-found", description = "Delete the Numaflow pipeline + serving manifests" }
+# Validate manifests without a cluster (server-side dry run needs a cluster).
+"numaflow:validate" = { run = "kubectl apply --dry-run=client -f NUMAFLOW/pipelines/", description = "Client-side validate the Numaflow manifests" }

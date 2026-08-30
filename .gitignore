@@ -59,3 +59,12 @@ ARCHIVE
 # Ignore any Agentic Toolng ..
 .commandcode
 
+# Temporal dev server db + Overmind socket
+.overmind.sock
+
+# air build outputs (per-binary/per-session)
+.air-*/
+
+# IsleDB local data + reader caches (NUMAFLOW scale-out tier)
+isledb-data/
+isledb-cache/

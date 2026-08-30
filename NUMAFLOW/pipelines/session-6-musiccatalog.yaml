@@ -1,0 +1,76 @@
+# Session 6 — MusicCatalogModules  (🟡 partial — pipeline update ✔, PState migration external)
+#
+# Rama concepts: multiple compatible versions of one logical module; live module
+# update under a stable name; typed PState schema migration; idempotent migration
+# functions; existing records migrated to the new schema while new records are
+# written directly in the new schema; safe rollout / version coexistence.
+#
+# Numaflow covers:
+#   - live update under a stable Pipeline name via the update strategy
+#   - version coexistence via blue/green pipelines sharing the same Kafka depot
+#     (two consumerGroups) during rollout
+#
+# Go/Temporal covers (the actual point of the example):
+#   - typed schema migration of the catalog PState -> Temporal migration workflow
+#   - idempotent, resumable, exactly-once migration of existing records
+#   - dual-write compatibility window (readers accept v1 & v2 during rollout)
+#
+# Rollout choreography (see TECHSPEC §Migrations):
+#   1. Deploy catalog-writer v2 (writes new schema; readers understand v1+v2).
+#   2. Start Temporal `MigrateCatalogV1toV2` workflow: scans v1 records in the
+#      State service, transforms idempotently, writes v2, checkpoints progress.
+#   3. When migration workflow completes, drop v1 read compatibility.
+# This manifest shows the v2 pipeline with a rolling update strategy.
+---
+apiVersion: numaflow.numaproj.io/v1alpha1
+kind: Pipeline
+metadata:
+  name: musiccatalog
+  annotations:
+    rama-workshop/schema-version: "v2"
+spec:
+  lifecycle:
+    # Live update under the stable name "musiccatalog".
+    deleteGracePeriodSeconds: 30
+  vertices:
+    - name: catalog-in
+      source:
+        kafka:
+          brokers: ["kafka:9092"]
+          topic: catalogEvents
+          consumerGroup: musiccatalog-v2
+        transformer:
+          container:
+            image: ghcr.io/rama-workshop/envelope-transformer:latest
+
+    - name: catalog-writer
+      # v2 writer: validates against the v2 typed schema and writes v2 records.
+      udf:
+        container:
+          image: ghcr.io/rama-workshop/session6-catalog-writer:v2
+          env:
+            - name: STATE_STORE_ADDR
+              value: stated:4317
+            - name: SCHEMA_VERSION
+              value: "v2"
+      partitions: 3
+      # Rolling update: new pods start before old drain, allowing v1/v2 coexistence.
+      updateStrategy:
+        type: RollingUpdate
+        rollingUpdate:
+          maxUnavailable: "25%"
+
+    - name: catalog-sink
+      sink:
+        udsink:
+          container:
+            image: ghcr.io/rama-workshop/session6-catalog-sink:v2
+            env:
+              - name: STATE_STORE_ADDR
+                value: stated:4317
+
+  edges:
+    - from: catalog-in
+      to: catalog-writer
+    - from: catalog-writer
+      to: catalog-sink

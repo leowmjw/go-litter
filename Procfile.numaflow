@@ -1,0 +1,20 @@
+# Procfile.numaflow — local dev for the NUMAFLOW hybrid Go services.
+#
+# Scaffolding only: the referenced binaries (cmd/stated, cmd/worker, cmd/queryd)
+# are added when implementation begins (see NUMAFLOW/TECHSPEC.md §1, §10).
+# Numaflow pipelines themselves run in a Kubernetes cluster and are applied with
+# `mise run numaflow:apply` — not as Procfile processes.
+#
+# Start with:  mise run numaflow:dev   (wraps `overmind start -f Procfile.numaflow`)
+
+# Temporal dev server (control plane for sagas + migrations; §5).
+temporal: temporal server start-dev --db-filename .temporal/temporal.db --metrics-port 8077
+
+# State service — the PState layer (Pebble MVP; IsleDB tier behind the contract; §3).
+stated: air -c cmd/stated/.air.toml
+
+# Temporal worker — transfer saga, friend-accept tx, schema migration (§5).
+worker: air -c cmd/worker/.air.toml
+
+# Query service — point/range/paginated queries over stated (§7).
+queryd: air -c cmd/queryd/.air.toml

@@ -1,0 +1,113 @@
+# Session 1 — ProfileModule
+#
+# Rama concepts: registration depot (hash by username -> atomic unique claim),
+# repartition to userID, profile creation + partial edits, profiles PState.
+#
+# Numaflow covers: durable ingest of registration/edit events, keyed routing,
+# repartition (username-keyed vertex -> userID-keyed vertex via a keyed edge).
+#
+# Go/Temporal covers (see TECHSPEC §Gap map):
+#   - atomic duplicate-safe username claim  -> State service CAS (claim-if-absent)
+#   - profiles PState (map[userID]Profile)  -> State service, written by UDSink
+#   - queries (profile, password hash)      -> Query service / ServingPipeline
+#
+# Fit: 🟡 partial. Streaming + repartition are native; uniqueness + queryable
+# profile view are external.
+---
+apiVersion: numaflow.numaproj.io/v1alpha1
+kind: Pipeline
+metadata:
+  name: profiles
+spec:
+  # ---- Registration flow -------------------------------------------------
+  vertices:
+    - name: registrations-in
+      # Depot: userRegistrations. Dev uses http; prod uses kafka topic keyed by username.
+      source:
+        http: {}
+        # kafka:
+        #   brokers: ["kafka:9092"]
+        #   topic: userRegistrations
+        #   consumerGroup: profiles
+        transformer:
+          # Extract eventTime + set partition key = username so the claim vertex
+          # sees all attempts for one username on the same partition (ordering aid).
+          container:
+            image: ghcr.io/rama-workshop/envelope-transformer:latest
+
+    - name: claim-username
+      # Map UDF. Calls State service CAS "claim username -> generate userID".
+      # Emits tag "registered" on success, "duplicate" on conflict.
+      # THIS is the atomic-conditional-write gap; the UDF is a thin gRPC client.
+      udf:
+        container:
+          image: ghcr.io/rama-workshop/session1-claim-username:latest
+          env:
+            - name: STATE_STORE_ADDR
+              value: stated:4317
+      partitions: 4 # keyed by username
+
+    - name: profiles-writer
+      # UDSink: writes profile record into profiles PState keyed by userID.
+      # Idempotent by eventId (exactly-once effect).
+      sink:
+        udsink:
+          container:
+            image: ghcr.io/rama-workshop/session1-profiles-writer:latest
+            env:
+              - name: STATE_STORE_ADDR
+                value: stated:4317
+
+    - name: duplicate-log
+      sink:
+        log: {}
+
+    # ---- Profile edit flow -------------------------------------------------
+    - name: edits-in
+      # Depot: profileEdits, keyed by userID.
+      source:
+        http: {}
+        transformer:
+          container:
+            image: ghcr.io/rama-workshop/envelope-transformer:latest
+
+    - name: apply-edit
+      # Map UDF: validates allowed field, performs partial update on profiles
+      # PState (untouched fields preserved). Read-modify-write is done atomically
+      # inside the State service per userID key.
+      udf:
+        container:
+          image: ghcr.io/rama-workshop/session1-apply-edit:latest
+          env:
+            - name: STATE_STORE_ADDR
+              value: stated:4317
+      partitions: 4 # keyed by userID (repartition from username space)
+
+    - name: edits-writer
+      sink:
+        udsink:
+          container:
+            image: ghcr.io/rama-workshop/session1-profiles-writer:latest
+            env:
+              - name: STATE_STORE_ADDR
+                value: stated:4317
+
+  edges:
+    - from: registrations-in
+      to: claim-username
+    - from: claim-username
+      to: profiles-writer
+      conditions:
+        tags:
+          operator: or
+          values: ["registered"]
+    - from: claim-username
+      to: duplicate-log
+      conditions:
+        tags:
+          operator: or
+          values: ["duplicate"]
+    - from: edits-in
+      to: apply-edit
+    - from: apply-edit
+      to: edits-writer

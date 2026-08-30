@@ -1,0 +1,91 @@
+# Session 3 — TopUsersModule
+#
+# Rama concepts: per-user accumulated spend; realtime running top-500 by spend;
+# global partition + global PState; monotonic top-N with replacement; server-side
+# projection of userIDs from ranked tuples.
+#
+# Numaflow covers (🟡 partial):
+#   - per-user spend accumulation -> keyed reduce (key = userID)
+#   - global aggregation          -> non-keyed reduce, single partition
+#   - "running / never-closing" state -> ACCUMULATOR window (unaligned, keeps
+#     evolving state instead of closing a fixed window)
+#
+# Go/Temporal covers:
+#   - durable running top-500 PState (the reduce PVC is replay-only, not queryable)
+#   - top-N query + server-side userID projection -> Query service
+#
+# Design note: top-N is a running global ranking, which does not fit a *closing*
+# fixed window. Two options are shown:
+#   (A) accumulator window computing spend deltas, State service maintains the
+#       authoritative sorted top-N (recommended);
+#   (B) periodic sliding window emitting a recomputed top-N snapshot.
+# This manifest uses (A).
+---
+apiVersion: numaflow.numaproj.io/v1alpha1
+kind: Pipeline
+metadata:
+  name: topusers
+spec:
+  vertices:
+    - name: purchases-in
+      source:
+        kafka:
+          brokers: ["kafka:9092"]
+          topic: purchases
+          consumerGroup: topusers
+        transformer:
+          container:
+            image: ghcr.io/rama-workshop/envelope-transformer:latest
+
+    - name: per-user-spend
+      # Keyed accumulator: maintains accumulated spend per user and emits the
+      # (userID, newTotalSpend) delta whenever it changes.
+      udf:
+        container:
+          image: ghcr.io/rama-workshop/session3-user-spend:latest
+        groupBy:
+          window:
+            accumulator:
+              timeout: 60s
+          keyed: true # key = userID
+          storage:
+            persistentVolumeClaim:
+              volumeSize: 5Gi
+              accessMode: ReadWriteOncePod
+      partitions: 4
+
+    - name: global-topn
+      # Non-keyed single partition: folds per-user spend deltas and keeps a bounded
+      # top-500 in memory, emitting the (possibly changed) ranking downstream.
+      udf:
+        container:
+          image: ghcr.io/rama-workshop/session3-global-topn:latest
+        groupBy:
+          window:
+            accumulator:
+              timeout: 60s
+          keyed: false
+          storage:
+            persistentVolumeClaim:
+              volumeSize: 2Gi
+              accessMode: ReadWriteOncePod
+      partitions: 1 # global partition — must stay 1 for a single global ranking
+
+    - name: topn-writer
+      # UDSink: persists the authoritative top-500 (and per-user spend) into the
+      # State service so queries never scan the whole space.
+      sink:
+        udsink:
+          container:
+            image: ghcr.io/rama-workshop/session3-topn-writer:latest
+            env:
+              - name: STATE_STORE_ADDR
+                value: stated:4317
+
+  edges:
+    - from: purchases-in
+      to: per-user-spend
+    - from: per-user-spend
+      to: global-topn
+    - from: global-topn
+      to: topn-writer

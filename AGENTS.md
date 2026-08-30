@@ -51,6 +51,26 @@ routing, testing/synctest
 - Finally CI/CD will use End-to-End Tests
 - Implement this ONLY after Unit/Integration tests are passing
 
+## Alternative Runtime — Numaflow (design study, no implementation)
+
+- `NUMAFLOW/` holds a hybrid design that runs the streaming/ETL half on
+  [Numaflow](https://numaflow.numaproj.io/) and keeps a Go + Temporal layer for the
+  parts Numaflow does not provide (queryable PStates, cross-partition transactions,
+  ordering, atomic conditional writes, migrations).
+- Start at [`NUMAFLOW/README.md`](NUMAFLOW/README.md); behavior in
+  [`NUMAFLOW/PRD.md`](NUMAFLOW/PRD.md); Go/Temporal architecture in
+  [`NUMAFLOW/TECHSPEC.md`](NUMAFLOW/TECHSPEC.md); per-scenario pipeline configs in
+  `NUMAFLOW/pipelines/*.yaml`.
+- Storage tiering for the PState service (`stated`): **Pebble** is the MVP engine
+  (pure Go, atomic synced-batch commit, stream/hot PStates); **IsleDB** on
+  Cloudflare R2 / AWS S3 is the pure-Go scale-out tier for microbatch/large/range
+  PStates (SlateDB is rejected as it is Rust/CGO). See `NUMAFLOW/TECHSPEC.md` §3.1.
+- This is a study, not the mandated runtime; the parent `PRD.md`/`TECHSPEC.md`
+  (Temporal + custom Go dataflow runtime) remain the primary path. It does not
+  override this file.
+- Dev: `mise run numaflow:dev` (Go services via `Procfile.numaflow`);
+  `mise run numaflow:apply` / `numaflow:validate` for the pipeline manifests.
+
 ## Implementation Status & Learnings
 
 ### Current checkpoint — gallery modules complete, commands/tutorial pending

@@ -1,0 +1,303 @@
+# Capstone — RamaSpace (Tutorial 6)
+#
+# A social network: profiles, bidirectional friendships, wall posts with reverse-
+# chronological pagination, and per-hour profile-view analytics. This file bundles
+# the four ingestion/ETL pipelines plus one ServingPipeline for the resolve-posts
+# query round trip. (Multiple YAML documents separated by `---`.)
+#
+# Fit summary:
+#   - Users stream, Friends stream       -> Numaflow stream (map) + State service
+#   - Posts microbatch                    -> Numaflow reduce (batch) + State service
+#   - Profile-views microbatch            -> Numaflow reduce (hour buckets)
+#   - Resolve-posts query                 -> ServingPipeline (round trip) + State service
+#
+# Go/Temporal covers: all PStates (profiles, friends, requests, posts, views),
+# the friend-ACCEPT cross-set transaction, monotonic post IDs, pagination, and the
+# server-side author enrichment used by resolve-posts.
+#
+# Depots (Kafka topics), partition keys per parent PRD §RamaSpace Depots:
+#   userRegistrations(hash userID), profileEdits(hash userID),
+#   friendRequests(hash initiatorID), friendshipChanges(hash firstUserID),
+#   posts(hash wallUserID), profileViews(hash viewedUserID).
+#
+# =====================================================================
+# 1) USERS STREAM  (registration + profile edits)
+# =====================================================================
+apiVersion: numaflow.numaproj.io/v1alpha1
+kind: Pipeline
+metadata:
+  name: ramaspace-users
+spec:
+  vertices:
+    - name: registrations-in
+      source:
+        kafka:
+          brokers: ["kafka:9092"]
+          topic: userRegistrations
+          consumerGroup: ramaspace-users
+        transformer:
+          container:
+            image: ghcr.io/rama-workshop/envelope-transformer:latest
+    - name: register
+      # CAS create-if-absent on profiles PState; persists winning registration UUID.
+      udf:
+        container:
+          image: ghcr.io/rama-workshop/ramaspace-register:latest
+          env:
+            - name: STATE_STORE_ADDR
+              value: stated:4317
+      partitions: 4 # key = userID
+    - name: edits-in
+      source:
+        kafka:
+          brokers: ["kafka:9092"]
+          topic: profileEdits
+          consumerGroup: ramaspace-users
+        transformer:
+          container:
+            image: ghcr.io/rama-workshop/envelope-transformer:latest
+    - name: apply-edit
+      udf:
+        container:
+          image: ghcr.io/rama-workshop/ramaspace-apply-edit:latest
+          env:
+            - name: STATE_STORE_ADDR
+              value: stated:4317
+      partitions: 4 # key = userID
+    - name: users-sink
+      sink:
+        udsink:
+          container:
+            image: ghcr.io/rama-workshop/ramaspace-profiles-writer:latest
+            env:
+              - name: STATE_STORE_ADDR
+                value: stated:4317
+  edges:
+    - from: registrations-in
+      to: register
+    - from: register
+      to: users-sink
+    - from: edits-in
+      to: apply-edit
+    - from: apply-edit
+      to: users-sink
+---
+# =====================================================================
+# 2) FRIENDS STREAM  (request / cancel / add / remove)
+# =====================================================================
+# friend-ACCEPT is the cross-set transaction (clear both pending sets + add both
+# friendship edges) — routed to a Temporal workflow via the UDSink.
+apiVersion: numaflow.numaproj.io/v1alpha1
+kind: Pipeline
+metadata:
+  name: ramaspace-friends
+spec:
+  vertices:
+    - name: requests-in
+      # carries FriendRequest + CancelFriendRequest, hashed by initiatorID so
+      # request/cancel for one initiator keep append order on one partition.
+      source:
+        kafka:
+          brokers: ["kafka:9092"]
+          topic: friendRequests
+          consumerGroup: ramaspace-friends
+        transformer:
+          container:
+            image: ghcr.io/rama-workshop/envelope-transformer:latest
+    - name: apply-request
+      # add/remove outgoing+incoming pending-request set entries in State service.
+      udf:
+        container:
+          image: ghcr.io/rama-workshop/ramaspace-friend-request:latest
+          env:
+            - name: STATE_STORE_ADDR
+              value: stated:4317
+      partitions: 4 # key = initiatorID
+    - name: changes-in
+      # carries FriendshipAdd (accept) + FriendshipRemove (unfriend).
+      source:
+        kafka:
+          brokers: ["kafka:9092"]
+          topic: friendshipChanges
+          consumerGroup: ramaspace-friends
+        transformer:
+          container:
+            image: ghcr.io/rama-workshop/envelope-transformer:latest
+    - name: apply-change
+      # UDSink -> Temporal workflow performs the two-sided atomic update:
+      # clear pending requests both directions + add/remove friendship edges both
+      # directions. Idempotent by eventId.
+      sink:
+        udsink:
+          container:
+            image: ghcr.io/rama-workshop/ramaspace-friendship-tx:latest
+            env:
+              - name: TEMPORAL_HOSTPORT
+                value: temporal:7233
+              - name: TEMPORAL_TASK_QUEUE
+                value: ramaspace-tx
+    - name: requests-sink
+      sink:
+        udsink:
+          container:
+            image: ghcr.io/rama-workshop/ramaspace-friends-writer:latest
+            env:
+              - name: STATE_STORE_ADDR
+                value: stated:4317
+  edges:
+    - from: requests-in
+      to: apply-request
+    - from: apply-request
+      to: requests-sink
+    - from: changes-in
+      to: apply-change
+---
+# =====================================================================
+# 3) POSTS MICROBATCH  (explode batch -> task-local post IDs -> store on wall)
+# =====================================================================
+apiVersion: numaflow.numaproj.io/v1alpha1
+kind: Pipeline
+metadata:
+  name: ramaspace-posts
+spec:
+  vertices:
+    - name: posts-in
+      source:
+        kafka:
+          brokers: ["kafka:9092"]
+          topic: posts
+          consumerGroup: ramaspace-posts
+        transformer:
+          container:
+            image: ghcr.io/rama-workshop/envelope-transformer:latest
+    - name: batch-posts
+      # reduce (microbatch): coordinated batch per wall (key = wallUserID). Assigns
+      # a task-local monotonic postID ordered for reverse-chronological pagination.
+      udf:
+        container:
+          image: ghcr.io/rama-workshop/ramaspace-posts-batch:latest
+        groupBy:
+          window:
+            fixed:
+              length: 30s # parent PRD §Tutorial 5: configurable 30s microbatch window
+          keyed: true # key = wallUserID
+          storage:
+            persistentVolumeClaim:
+              volumeSize: 5Gi
+              accessMode: ReadWriteOncePod
+      partitions: 4
+    - name: posts-writer
+      # writes posts into map[wallUserID] sorted-map[postID] Post (subindexed).
+      sink:
+        udsink:
+          container:
+            image: ghcr.io/rama-workshop/ramaspace-posts-writer:latest
+            env:
+              - name: STATE_STORE_ADDR
+                value: stated:4317
+  edges:
+    - from: posts-in
+      to: batch-posts
+    - from: batch-posts
+      to: posts-writer
+---
+# =====================================================================
+# 4) PROFILE-VIEWS MICROBATCH  (hour-bucket counts, exactly-once)
+# =====================================================================
+apiVersion: numaflow.numaproj.io/v1alpha1
+kind: Pipeline
+metadata:
+  name: ramaspace-profileviews
+spec:
+  vertices:
+    - name: views-in
+      source:
+        kafka:
+          brokers: ["kafka:9092"]
+          topic: profileViews
+          consumerGroup: ramaspace-views
+        transformer:
+          builtin:
+            name: eventTimeExtractor
+            kwargs:
+              expression: 'json(payload).eventTime'
+              format: unix_ms
+    - name: count-by-hour
+      # reduce FIXED 1h window keyed by viewedUserID => count of views per hour.
+      udf:
+        container:
+          image: ghcr.io/rama-workshop/ramaspace-view-counter:latest
+        groupBy:
+          window:
+            fixed:
+              length: 3600s
+          keyed: true # key = viewedUserID
+          storage:
+            persistentVolumeClaim:
+              volumeSize: 5Gi
+              accessMode: ReadWriteOncePod
+      partitions: 4
+    - name: views-writer
+      # writes map[userID] sorted-map[hourBucket] count (subindexed) for range sums.
+      sink:
+        udsink:
+          container:
+            image: ghcr.io/rama-workshop/ramaspace-views-writer:latest
+            env:
+              - name: STATE_STORE_ADDR
+                value: stated:4317
+  edges:
+    - from: views-in
+      to: count-by-hour
+    - from: count-by-hour
+      to: views-writer
+---
+# =====================================================================
+# 5) RESOLVE-POSTS QUERY  (round-trip request/response)
+# =====================================================================
+# Fetch <=20 posts from a wall at a cursor, resolve each author's displayName +
+# profilePic from the profiles PState, return in order, single client round trip.
+apiVersion: numaflow.numaproj.io/v1alpha1
+kind: ServingPipeline
+metadata:
+  name: ramaspace-resolve-posts
+spec:
+  serving:
+    service: true
+    msgIDHeaderKey: X-Numaflow-Id
+    requestTimeoutSeconds: 30
+    # results returned synchronously via POST /v1/process/sync
+  pipeline:
+    vertices:
+      - name: query-in
+        source:
+          serving: {}
+      - name: fetch-page
+        # reads a page of <=20 posts from posts PState starting at cursor.
+        udf:
+          container:
+            image: ghcr.io/rama-workshop/ramaspace-fetch-page:latest
+            env:
+              - name: STATE_STORE_ADDR
+                value: stated:4317
+      - name: resolve-authors
+        # server-side enrichment: batch-looks-up author profiles, preserves order.
+        udf:
+          container:
+            image: ghcr.io/rama-workshop/ramaspace-resolve-authors:latest
+            env:
+              - name: STATE_STORE_ADDR
+                value: stated:4317
+      - name: respond
+        sink:
+          udsink:
+            # uses ResponseServe(requestID, resultBytes) to return the page.
+            container:
+              image: ghcr.io/rama-workshop/ramaspace-serve-response:latest
+    edges:
+      - from: query-in
+        to: fetch-page
+      - from: fetch-page
+        to: resolve-authors
+      - from: resolve-authors
+        to: respond

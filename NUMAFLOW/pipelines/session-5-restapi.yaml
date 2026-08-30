@@ -1,0 +1,82 @@
+# Session 5 — RestAPIIntegrationModule  (🟢 strong fit)
+#
+# Rama concepts: process/task-scoped resource lifecycle; async external I/O inside
+# a stream topology; partition requests by URL; store the latest response;
+# dependency injection around external I/O.
+#
+# Numaflow covers this pattern natively: a map UDF performs async HTTP I/O, keyed
+# by URL, and a UDSink stores the latest response. Side Inputs inject rotating
+# API credentials/config without restarting the pipeline.
+#
+# Go/Temporal covers:
+#   - latest-response PState (map[url]response) -> State service via UDSink
+#   - query "latest response for URL"          -> Query service
+#
+# Determinism note (parent PRD §Session 5): tests must NOT hit the public internet.
+# The UDF's HTTP client base URL is injected (DI) and points at an httptest server
+# in tests via the API_BASE_URL side input / env.
+---
+apiVersion: numaflow.numaproj.io/v1alpha1
+kind: Pipeline
+metadata:
+  name: restapi
+spec:
+  sideInputs:
+    - name: api-config
+      # Rotating endpoint/credentials broadcast to the fetch UDF on a schedule.
+      container:
+        image: ghcr.io/rama-workshop/session5-api-config-sideinput:latest
+      trigger:
+        schedule: "0 */15 * * * *"
+  vertices:
+    - name: requests-in
+      source:
+        http: {}
+        transformer:
+          container:
+            image: ghcr.io/rama-workshop/envelope-transformer:latest
+
+    - name: fetch-url
+      # Map UDF: performs the async outbound REST call. Base URL / auth come from
+      # the api-config side input (DI seam). Retries via sink/retry are downstream;
+      # transient fetch errors are tagged "error".
+      udf:
+        container:
+          image: ghcr.io/rama-workshop/session5-fetch-url:latest
+        sideInputs:
+          - api-config
+      partitions: 4 # keyed by URL
+
+    - name: latest-response-writer
+      sink:
+        udsink:
+          container:
+            image: ghcr.io/rama-workshop/session5-latest-writer:latest
+            env:
+              - name: STATE_STORE_ADDR
+                value: stated:4317
+        retryStrategy:
+          backoff:
+            interval: 1s
+            steps: 5
+          onFailure: fallback
+      # fallback preserves the last known good response on repeated write failure.
+    - name: fetch-errors
+      sink:
+        log: {}
+
+  edges:
+    - from: requests-in
+      to: fetch-url
+    - from: fetch-url
+      to: latest-response-writer
+      conditions:
+        tags:
+          operator: or
+          values: ["ok"]
+    - from: fetch-url
+      to: fetch-errors
+      conditions:
+        tags:
+          operator: or
+          values: ["error"]
