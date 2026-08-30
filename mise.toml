@@ -14,7 +14,8 @@ _ = {
 [tasks]
 dev = { run = "mise run session-1:run" }
 test = { run = "go test ./..." }
-coverage = { run = "go test -coverprofile=.coverage.out ./... && go tool cover -func=.coverage.out" }
+coverage = { run = "go test -coverprofile=.coverage.out -coverpkg=./internal/... ./... && go tool cover -func=.coverage.out" }
+coverage-gate = { run = "go test -coverprofile=.coverage.out -coverpkg=./internal/... ./... && go tool cover -func=.coverage.out | awk '/^total:/{ sub(/%/, \"\", $NF); if ($NF < 80) { print \"coverage below 80%: \" $NF \"%\"; exit 1 } }'" }
 check = { run = "go test -race ./... && go vet ./... && go build ./..." }
 "session-1:run" = { run = "go run ./cmd/session-1" }
 "session-1:dev" = { run = "overmind start -f Procfile.session-1" }

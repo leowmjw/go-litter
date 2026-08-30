@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -162,6 +164,18 @@ func TestRuntimeValidationAndScheduler(t *testing.T) {
 	}
 }
 
+func TestSchedulerDefaultWaitAndCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	scheduler, err := NewScheduler(time.Hour, func(context.Context) error { return nil }, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := scheduler.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func stateTotal(t *testing.T, store *storage.Store, state func(uint32) storage.StatePartition, tasks uint32) uint64 {
 	t.Helper()
 	var total uint64
@@ -182,4 +196,177 @@ func decode(value []byte) uint64 {
 		return 0
 	}
 	return binary.BigEndian.Uint64(value)
+}
+
+func TestRuntimePebbleCrashBoundaryReopen(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "store")
+	newRuntime := func(store *storage.Store) *Runtime {
+		choose, _ := partition.New(1)
+		state := storage.StatePartition{Module: "module", State: "count", Partition: 0}
+		topology := Topology{
+			Name:    "count",
+			Sources: []Source{{Depot: "events", PartitionKey: func([]byte) ([]byte, error) { return []byte("key"), nil }}},
+			Handle: func(_ context.Context, event *Event, items []Item) error {
+				value, _, err := event.Get(ctx, state, []byte("count"))
+				if err != nil {
+					return err
+				}
+				event.Set(state, []byte("count"), binary.BigEndian.AppendUint64(nil, decode(value)+uint64(len(items))))
+				return nil
+			},
+		}
+		runtime, err := New("module", 1, choose, store, topology)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return runtime
+	}
+
+	store, err := storage.NewPebble(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := newRuntime(store)
+	for i := range 3 {
+		record, err := runtime.Append(ctx, "events", fmt.Sprintf("r%d", i), []byte("event"))
+		if err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+		if record.Position != uint64(i+1) {
+			t.Fatalf("append %d position = %d", i, record.Position)
+		}
+	}
+	count, err := runtime.Advance(ctx, "count")
+	if err != nil || count != 3 {
+		t.Fatalf("advance before crash: count=%d err=%v", count, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = storage.NewPebble(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	runtime = newRuntime(store)
+
+	// Replaying an acknowledged id is a duplicate.
+	dup, err := runtime.Append(ctx, "events", "r0", []byte("event"))
+	if err != nil {
+		t.Fatalf("replayed append: %v", err)
+	}
+	if dup.Position != 1 {
+		t.Fatalf("replayed append position = %d", dup.Position)
+	}
+
+	for i := 3; i < 5; i++ {
+		if _, err := runtime.Append(ctx, "events", fmt.Sprintf("r%d", i), []byte("event")); err != nil {
+			t.Fatalf("append after reopen %d: %v", i, err)
+		}
+	}
+	count, err = runtime.Advance(ctx, "count")
+	if err != nil || count != 2 {
+		t.Fatalf("advance after reopen: count=%d err=%v", count, err)
+	}
+	count, err = runtime.Advance(ctx, "count")
+	if err != nil || count != 0 {
+		t.Fatalf("second advance after reopen: count=%d err=%v", count, err)
+	}
+
+	value, found, err := store.GetState(ctx, storage.StatePartition{Module: "module", State: "count", Partition: 0}, []byte("count"))
+	if err != nil || !found || decode(value) != 5 {
+		t.Fatalf("count state = %d, found=%v err=%v", decode(value), found, err)
+	}
+}
+
+func TestRuntimePebbleSnapshotReopen(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	path := filepath.Join(root, "source")
+	destination := filepath.Join(root, "snapshot")
+
+	newRuntime := func(store *storage.Store) *Runtime {
+		choose, _ := partition.New(1)
+		state := storage.StatePartition{Module: "module", State: "count", Partition: 0}
+		topology := Topology{
+			Name:    "count",
+			Sources: []Source{{Depot: "events", PartitionKey: func([]byte) ([]byte, error) { return []byte("key"), nil }}},
+			Handle: func(_ context.Context, event *Event, items []Item) error {
+				value, _, err := event.Get(ctx, state, []byte("count"))
+				if err != nil {
+					return err
+				}
+				event.Set(state, []byte("count"), binary.BigEndian.AppendUint64(nil, decode(value)+uint64(len(items))))
+				return nil
+			},
+		}
+		runtime, err := New("module", 1, choose, store, topology)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return runtime
+	}
+
+	store, err := storage.NewPebble(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := newRuntime(store)
+	for i := range 3 {
+		if _, err := runtime.Append(ctx, "events", fmt.Sprintf("r%d", i), []byte("event")); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	count, err := runtime.Advance(ctx, "count")
+	if err != nil || count != 3 {
+		t.Fatalf("advance before snapshot: count=%d err=%v", count, err)
+	}
+	if err := store.Snapshot(ctx, destination); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	for i := 3; i < 5; i++ {
+		if _, err := runtime.Append(ctx, "events", fmt.Sprintf("r%d", i), []byte("event")); err != nil {
+			t.Fatalf("append after snapshot %d: %v", i, err)
+		}
+	}
+	if _, err := runtime.Advance(ctx, "count"); err != nil {
+		t.Fatalf("advance after snapshot: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := storage.NewPebble(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snapshot.Close()
+	runtime = newRuntime(snapshot)
+
+	// Snapshot must contain the first committed batch and not the later records.
+	value, found, err := snapshot.GetState(ctx, storage.StatePartition{Module: "module", State: "count", Partition: 0}, []byte("count"))
+	if err != nil || !found || decode(value) != 3 {
+		t.Fatalf("snapshot state = %d, found=%v err=%v", decode(value), found, err)
+	}
+	records, err := snapshot.Read(ctx, storage.DepotPartition{Module: "module", Depot: "events", Partition: 0}, 1, 10)
+	if err != nil || len(records) != 3 {
+		t.Fatalf("snapshot records = %d, %v", len(records), err)
+	}
+
+	// The snapshot can continue processing independently.
+	for i := 5; i < 7; i++ {
+		if _, err := runtime.Append(ctx, "events", fmt.Sprintf("r%d", i), []byte("event")); err != nil {
+			t.Fatalf("append after reopen %d: %v", i, err)
+		}
+	}
+	count, err = runtime.Advance(ctx, "count")
+	if err != nil || count != 2 {
+		t.Fatalf("advance snapshot after reopen: count=%d err=%v", count, err)
+	}
+	value, found, err = snapshot.GetState(ctx, storage.StatePartition{Module: "module", State: "count", Partition: 0}, []byte("count"))
+	if err != nil || !found || decode(value) != 5 {
+		t.Fatalf("snapshot state after continue = %d, found=%v err=%v", decode(value), found, err)
+	}
 }
