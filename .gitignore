@@ -11,9 +11,10 @@
 # Ignore binary
 bin/
 .air-session-*/
+.air-quick-tutorial/
 .data/
 .temporal/
-session-*
+/session-*
 
 # Test binary, built with `go test -c`
 *.test
