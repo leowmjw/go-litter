@@ -12,6 +12,7 @@
 bin/
 .air-session-*/
 .air-quick-tutorial/
+.air-quick-tutorial-tutorial/
 .data/
 .temporal/
 /session-*

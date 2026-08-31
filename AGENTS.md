@@ -110,6 +110,24 @@ Independent tracks that can be picked up in parallel:
 
 No hard blockers remain. The design cautions below do not block the parallel tracks.
 
+## Quick tutorial UI checkpoint and remaining gaps
+
+The interactive tutorial server is available through `mise run quick-tutorial:tutorial:run` and `mise run quick-tutorial:tutorial:dev`. It uses the existing `internal/tutorial` Stage 1–5 modules and DataStar SSE responses.
+
+Current state:
+
+- Stage 1 has a server-rendered result fragment for the latest greeting.
+- Stage 2 has server-rendered PState and server-side transform result fragments, including proper HTML lists for tags and events.
+- Stage 3 has a server-rendered partition/inbox result fragment with an HTML list.
+- Stages 4 and 5 remain functional but still render their results primarily through text/signals; convert them to structured server-rendered fragments for consistency.
+- Stage 6 remains a placeholder page. Mount a live in-memory RamaSpace module in the tutorial server, expose its existing HTTP API below `/stage6/api/`, and add an interactive capstone walkthrough for registration, friendships, posts, profile views, and explicit microbatch advance.
+- Keep explicit microbatch advance visible in the Stage 6 teaching UI so junior developers can observe that appending posts/profile views does not immediately materialize PState effects.
+- Add HTTP/SSE tests for the Stage 2 and Stage 3 rendered fragments and for the eventual live Stage 6 workflow.
+- `go test ./internal/tutorialserver/...` passes at this checkpoint.
+- The browser currently uses the stable DataStar v1.0.2 bundle with `datastar-go` v1.2.0; reassess the pin when a stable DataStar v2 release is available rather than using an unstable branch silently.
+
+Do not modify Sessions 3–6 while completing this tutorial UI track; another workstream owns those commands.
+
 ## Design issues to revisit later
 
 - `internal/topusers` recomputes the global top-spending list by scanning every `UserTotalSpend` partition. Replace this with a true global-partition aggregation before distributed/multi-worker execution.
