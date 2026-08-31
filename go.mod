@@ -4,6 +4,7 @@ go 1.27.0
 
 require (
 	github.com/cockroachdb/pebble/v2 v2.1.6
+	go.temporal.io/api v1.63.4
 	go.temporal.io/sdk v1.48.0
 )
 
@@ -46,7 +47,6 @@ require (
 	github.com/rogpeppe/go-internal v1.11.0 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
 	github.com/stretchr/testify v1.10.0 // indirect
-	go.temporal.io/api v1.63.4 // indirect
 	golang.org/x/exp v0.0.0-20240325151524-a685a6edb6d8 // indirect
 	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect

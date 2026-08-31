@@ -21,3 +21,5 @@ check = { run = "go test -race ./... && go vet ./... && go build ./..." }
 "session-1:dev" = { run = "overmind start -f Procfile.session-1" }
 "session-2:run" = { run = "go run ./cmd/session-2" }
 "session-2:dev" = { run = "overmind start -f Procfile.session-2" }
+"quick-tutorial:run" = { run = "go run ./cmd/quick-tutorial" }
+"quick-tutorial:dev" = { run = "overmind start -f Procfile.quick-tutorial" }
