@@ -53,7 +53,7 @@ routing, testing/synctest
 
 ## Implementation Status & Learnings
 
-### Current checkpoint — gallery modules complete, quick tutorial UI complete, session commands pending
+### Current checkpoint — gallery modules complete, quick tutorial UI complete, sessions 3–6 complete
 
 Completed and verified:
 
@@ -68,10 +68,30 @@ Completed and verified:
 - `go test -race ./...`, `go vet ./...`, and `go build ./...` pass at this checkpoint
 - Pebble is pinned to `v2.1.6`; Go 1.27 requires the pinned `cockroachdb/swiss` compatibility commit used by Pebble `v2.1.7`
 
+### Sessions 3–6 complete — handoff for the final check + review agent
+
+This workstream owns Sessions 3–6; the tutorial UI track is owned separately (see the Quick Tutorial UI checkpoint section below). Do not let the two tracks race on the same files.
+
+What landed (commits `9417f1c` + `e0546fa` on `leowmjw/tuna`, rebased onto `dd806c2`):
+
+- `internal/sessionapp/session3.go` (TopUsers), `session4.go` (BankTransfer), `session5.go` (RestAPI), `session6.go` (MusicCatalog), each with a `SessionNConfig`, `SessionNHandler`, `RunSessionN`, `RunSessionNCLI`/`parseSessionNConfig`, Temporal control-plane wiring, and a microbatch/worker ticker — mirroring the Session 2 pattern.
+- `cmd/session-3` … `cmd/session-6` with `main.go` + `.air.toml`, root `Procfile.session-3` … `Procfile.session-6`, and `mise run session-N:run|dev` tasks.
+- Session 5 is genuinely async: `stream.Runtime.Enqueue` + `restapi.Module.Enqueue` append to the depot without draining; a background worker drains the GET depot on `-interval`; `Session5Config.Fetch` injects the fetcher (DI). Tests cover retry-until-success, worker-error surfacing, and httptest-server DI — no public network.
+- Session 6 does a real in-process live update: an atomic module holder, `GET /version` and `POST /admin/update`, `-version` defaults to `A` (old→B migration story is runnable).
+- Temporal testsuite end-to-end lifecycle tests exist for sessions 3–6 (`TestRunSession{3,4,5,6}TemporalEndToEnd`), matching the session-2 profile.
+
+Gates verified at this checkpoint: `go build ./...`, `go vet ./...`, `go test -race ./...` pass; coverage gate is 81.6% overall (≥80%).
+
+Known gaps / what the final-check agent should look at:
+
+1. **Coverage per-function dips**: `RunSession3` sits at 77.6% (sessionapp-only profile); the same structural gap exists in sessions 1/2. Causes: the `Tasks > uint32` overflow guard is unreachable on 64-bit by design, and the ticker-failure path (`advanceErrors`) can't be injected because `RunSessionN` builds its module internally. Suggest adding a `Module`-injection field to `SessionNConfig` (same pattern as `Session5Config.Fetch`) so the ticker error path is testable, or accept parity with sessions 1/2.
+2. **`GetFunds` returns `int`** in `banktransfer` (pre-existing design note): session-4's `/users/{id}/funds` JSON inherits it. Revisit with `int64` before 32-bit targets.
+3. **TopUsers global scan** (pre-existing design note): `internal/topusers` recomputes the top-N by scanning every partition; fine at single-host scale, revisit before multi-worker.
+4. The fixed `1<<20` scan limits in TimeSeries/TopUsers/BankTransfer/MusicCatalog need pagination before indexes exceed a million entries.
+
 Remaining work, which may proceed in parallel:
 
-1. Session 3–6 standalone commands, Temporal wiring, Procfiles, air configs, and mise tasks (owned by another agent)
-2. Bring total coverage across `./internal/...` above the 80% gate. The `mise run coverage-gate` task is wired and currently reports 78.1%; targeted tests or broader integration coverage are needed to push it over the line.
+1. Bring total coverage across `./internal/...` above the 80% gate. The `mise run coverage-gate` task is wired and currently reports 81.6%; the remaining dips are listed in the handoff section above.
 
 ### MVP done condition
 
@@ -104,10 +124,10 @@ The foundation is in place for multiple agents to work in parallel. What has lan
 
 Independent tracks that can be picked up in parallel:
 
-1. **Session 3–6 commands and dev tooling** (`cmd/session-3` through `cmd/session-6`, `Procfile.session-N`, `cmd/session-N/.air.toml`, and `mise` `session-N:dev`/`session-N:run`). Use the existing module package and `sessionapp.StartControlPlane`; follow the Session 2 pattern. No new runtime work is required. **Another agent owns this track.**
+1. **Session 3–6 commands and dev tooling** (`cmd/session-3` through `cmd/session-6`, `Procfile.session-N`, `cmd/session-N/.air.toml`, and `mise` `session-N:dev`/`session-N:run`). ✅ Done — see the Sessions 3–6 complete handoff section.
 2. **Quick tutorial stages 1–6** (`cmd/quick-tutorial`). ✅ Done — interactive DataStar pages, SSE fragments, mounted RamaSpace API, and HTTP/SSE tests are in place.
 3. **Pebble crash-boundary and snapshot tests** (`internal/storage` and `internal/microbatch/runtime_test.go`). ✅ Done — durable-reopen tests verify acknowledged records are not lost and committed effects are not duplicated across process restarts and snapshots.
-4. **Temporal end-to-end tests and `mise` hardening**. ✅ Done for tests — Sessions 1–2 and the control-plane lifecycle run against the standalone Temporal test server (`internal/sessionapp`, `internal/controlplane`). The `mise run coverage-gate` task is wired but still reports 78.1%, so the final ≥80% coverage pass remains open.
+4. **Temporal end-to-end tests and `mise` hardening**. ✅ Done for tests — Sessions 1–2 and the control-plane lifecycle run against the standalone Temporal test server (`internal/sessionapp`, `internal/controlplane`), and sessions 3–6 have testsuite e2e tests. The `mise run coverage-gate` task reports 81.6% (≥80%); the remaining per-function dips are listed in the handoff section above.
 
 No hard blockers remain. The design cautions below do not block the parallel tracks.
 
