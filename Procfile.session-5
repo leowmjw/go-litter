@@ -1,0 +1,2 @@
+temporal: temporal server start-dev --db-filename .temporal/temporal.db --metrics-port 8077
+app: air -c cmd/session-5/.air.toml

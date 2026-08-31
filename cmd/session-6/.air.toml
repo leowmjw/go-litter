@@ -1,0 +1,12 @@
+root = "."
+tmp_dir = ".air-session-6"
+
+[build]
+cmd = "go build -o ./.air-session-6/session-6 ./cmd/session-6"
+bin = "./.air-session-6/session-6"
+args_bin = ["-temporal-address=127.0.0.1:7233"]
+include_ext = ["go", "toml"]
+exclude_dir = [".air-session-6", ".data", ".git", ".temporal", "ARCHIVE", "EXAMPLE"]
+stop_on_error = true
+send_interrupt = true
+kill_delay = "500ms"

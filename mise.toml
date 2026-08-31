@@ -25,3 +25,11 @@ check = { run = "go test -race ./... && go vet ./... && go build ./..." }
 "quick-tutorial:dev" = { run = "overmind start -f Procfile.quick-tutorial" }
 "quick-tutorial:tutorial:run" = { run = "go run ./cmd/quick-tutorial tutorial" }
 "quick-tutorial:tutorial:dev" = { run = "air -c cmd/quick-tutorial/.air-tutorial.toml" }
+"session-3:run" = { run = "go run ./cmd/session-3" }
+"session-3:dev" = { run = "overmind start -f Procfile.session-3" }
+"session-4:run" = { run = "go run ./cmd/session-4" }
+"session-4:dev" = { run = "overmind start -f Procfile.session-4" }
+"session-5:run" = { run = "go run ./cmd/session-5" }
+"session-5:dev" = { run = "overmind start -f Procfile.session-5" }
+"session-6:run" = { run = "go run ./cmd/session-6" }
+"session-6:dev" = { run = "overmind start -f Procfile.session-6" }
