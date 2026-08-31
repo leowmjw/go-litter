@@ -3,6 +3,7 @@ package sessionapp
 import (
 	"bytes"
 	"context"
+	"errors"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -111,5 +112,32 @@ func TestSession2Handler(t *testing.T) {
 	handler.ServeHTTP(window, httptest.NewRequest(http.MethodGet, "/window?url=example.com&granularity=m&bucket="+strconv.Itoa(bucket), nil))
 	if window.Code != http.StatusOK {
 		t.Fatalf("window status = %d body=%s", window.Code, window.Body.String())
+	}
+}
+
+func TestTimeseriesQueryErrorStatus(t *testing.T) {
+	if status := timeseriesQueryErrorStatus(timeseries.ErrInvalidBucket); status != http.StatusBadRequest {
+		t.Fatalf("invalid bucket status = %d", status)
+	}
+	if status := timeseriesQueryErrorStatus(timeseries.ErrInvalidRange); status != http.StatusBadRequest {
+		t.Fatalf("invalid range status = %d", status)
+	}
+	if status := timeseriesQueryErrorStatus(timeseries.ErrUnknownGranularity); status != http.StatusBadRequest {
+		t.Fatalf("unknown granularity status = %d", status)
+	}
+	if status := timeseriesQueryErrorStatus(errors.New("other")); status != http.StatusInternalServerError {
+		t.Fatalf("other error status = %d", status)
+	}
+}
+
+func TestRunSession2CLIErrors(t *testing.T) {
+	if err := RunSession2CLI(context.Background(), []string{"-unknown"}); err == nil {
+		t.Fatal("expected flag error")
+	}
+	if err := RunSession2CLI(context.Background(), []string{"-memory", "-tasks=3"}); err == nil {
+		t.Fatal("expected task-count error")
+	}
+	if err := RunSession2CLI(context.Background(), []string{"-memory", "-tasks=4294967296"}); err == nil {
+		t.Fatal("expected uint32 overflow error")
 	}
 }
