@@ -53,7 +53,7 @@ routing, testing/synctest
 
 ## Implementation Status & Learnings
 
-### Current checkpoint — gallery modules complete, commands/tutorial pending
+### Current checkpoint — gallery modules complete, quick tutorial UI complete, session commands pending
 
 Completed and verified:
 
@@ -61,16 +61,17 @@ Completed and verified:
 - In-memory conformance storage, durable Pebble storage/reopen and snapshot support, stream and microbatch runtimes, and exactly-once mutation/checkpoint commits
 - All six gallery module packages and deterministic behavior tests: Profile, TimeSeries, TopUsers, BankTransfer, REST integration, and MusicCatalog migration
 - Reusable Temporal lifecycle control-plane helper with heartbeat/liveness workflow; Sessions 1 and 2 are wired to it
+- Quick Tutorial 1–5 interactive DataStar pages and in-memory Stage 6 RamaSpace capstone walkthrough, plus mounted JSON API
+- Pebble crash-boundary / snapshot durability tests in `internal/storage` and `internal/microbatch`
+- Temporal end-to-end tests for Sessions 1–2 and the control-plane lifecycle in `internal/sessionapp` and `internal/controlplane`
 - Concrete structs with replaceable function fields; no project-defined interfaces
 - `go test -race ./...`, `go vet ./...`, and `go build ./...` pass at this checkpoint
 - Pebble is pinned to `v2.1.6`; Go 1.27 requires the pinned `cockroachdb/swiss` compatibility commit used by Pebble `v2.1.7`
 
 Remaining work, which may proceed in parallel:
 
-1. Session 3–6 standalone commands, Temporal wiring, Procfiles, air configs, and mise tasks
-2. Quick Tutorial 1–5 progression and Tutorial 6 RamaSpace acceptance suite
-3. Process/crash-boundary durability tests for acknowledged appends and exactly-once commits
-4. Standalone Temporal end-to-end tests, current coverage measurement, and final MVP hardening/release gate
+1. Session 3–6 standalone commands, Temporal wiring, Procfiles, air configs, and mise tasks (owned by another agent)
+2. Bring total coverage across `./internal/...` above the 80% gate. The `mise run coverage-gate` task is wired and currently reports 78.1%; targeted tests or broader integration coverage are needed to push it over the line.
 
 ### MVP done condition
 
@@ -103,30 +104,40 @@ The foundation is in place for multiple agents to work in parallel. What has lan
 
 Independent tracks that can be picked up in parallel:
 
-1. **Session 3–6 commands and dev tooling** (`cmd/session-3` through `cmd/session-6`, `Procfile.session-N`, `cmd/session-N/.air.toml`, and `mise` `session-N:dev`/`session-N:run`). Use the existing module package and `sessionapp.StartControlPlane`; follow the Session 2 pattern. No new runtime work is required.
-2. **Quick tutorial stages 1–6** (`cmd/quick-tutorial`). This is a learning progression using the same runtime; it can be implemented and tested against `EXAMPLE` tutorial reference independently of the gallery commands.
-3. **Pebble crash-boundary and snapshot tests** (`internal/storage` and `internal/microbatch/runtime_test.go`). Add durable-reopen tests that verify acknowledged records are not lost and committed effects are not duplicated across process restarts.
-4. **Temporal end-to-end and `mise` hardening**: add tests that start the standalone Temporal test server for Session 1 and Session 2, wire `mise run check` to include end-to-end where appropriate, and bring coverage back above the 80% rule.
+1. **Session 3–6 commands and dev tooling** (`cmd/session-3` through `cmd/session-6`, `Procfile.session-N`, `cmd/session-N/.air.toml`, and `mise` `session-N:dev`/`session-N:run`). Use the existing module package and `sessionapp.StartControlPlane`; follow the Session 2 pattern. No new runtime work is required. **Another agent owns this track.**
+2. **Quick tutorial stages 1–6** (`cmd/quick-tutorial`). ✅ Done — interactive DataStar pages, SSE fragments, mounted RamaSpace API, and HTTP/SSE tests are in place.
+3. **Pebble crash-boundary and snapshot tests** (`internal/storage` and `internal/microbatch/runtime_test.go`). ✅ Done — durable-reopen tests verify acknowledged records are not lost and committed effects are not duplicated across process restarts and snapshots.
+4. **Temporal end-to-end tests and `mise` hardening**. ✅ Done for tests — Sessions 1–2 and the control-plane lifecycle run against the standalone Temporal test server (`internal/sessionapp`, `internal/controlplane`). The `mise run coverage-gate` task is wired but still reports 78.1%, so the final ≥80% coverage pass remains open.
 
 No hard blockers remain. The design cautions below do not block the parallel tracks.
 
-## Quick tutorial UI checkpoint and remaining gaps
+## Quick tutorial UI checkpoint
 
 The interactive tutorial server is available through `mise run quick-tutorial:tutorial:run` and `mise run quick-tutorial:tutorial:dev`. It uses the existing `internal/tutorial` Stage 1–5 modules and DataStar SSE responses.
 
-Current state:
+### Concise learnings from this track
 
-- Stage 1 has a server-rendered result fragment for the latest greeting.
-- Stage 2 has server-rendered PState and server-side transform result fragments, including proper HTML lists for tags and events.
-- Stage 3 has a server-rendered partition/inbox result fragment with an HTML list.
-- Stages 4 and 5 remain functional but still render their results primarily through text/signals; convert them to structured server-rendered fragments for consistency.
-- Stage 6 remains a placeholder page. Mount a live in-memory RamaSpace module in the tutorial server, expose its existing HTTP API below `/stage6/api/`, and add an interactive capstone walkthrough for registration, friendships, posts, profile views, and explicit microbatch advance.
-- Keep explicit microbatch advance visible in the Stage 6 teaching UI so junior developers can observe that appending posts/profile views does not immediately materialize PState effects.
-- Add HTTP/SSE tests for the Stage 2 and Stage 3 rendered fragments and for the eventual live Stage 6 workflow.
-- `go test ./internal/tutorialserver/...` passes at this checkpoint.
+- **Server-rendered fragments beat text signals for structured output.** HTML lists, definition lists, and cards are patched via `datastar.PatchElements(... WithModeInner())` into a stable container. This avoids needing client-side list iteration while keeping the UI reactive.
+- **Every stage owns its own result container ID.** Centralizing error handling through `writeSSEErrorWithResult(w, r, selector, err)` clears the current stage's fragment on failure so stale success state never survives an error.
+- **Microbatch teaching requires deterministic time.** Tests and UI that record a timestamp and later query by hour bucket must agree on the bucket; a fixed test timestamp removes hour-boundary flakes.
+- **Mount an existing JSON API with `http.StripPrefix`.** The RamaSpace capstone handler was reused unchanged under `/stage6/api/`; only the teaching page and a small snapshot glue function were new code.
+- **Keep the DataStar pin explicit and conservative.** `datastar-go` v1.2.0 is paired with the v1.0.2 browser bundle; reassess only when a stable DataStar v2 release exists.
+
+Completed:
+
+- Stage 1 renders the latest acknowledged greeting as a server-rendered result fragment.
+- Stage 2 renders scalar, map, set, list, and fixed-key-record PState results plus the server-side transform, including bounded HTML lists.
+- Stage 3 renders task ownership, repartitioning results, sent count, and inbox entries.
+- Stage 4 renders every emitted immutable binding set as a structured card with deterministic key ordering.
+- Stage 5 renders stream and microbatch counts side by side and explicitly distinguishes a pending depot append from a committed microbatch checkpoint.
+- Stage 6 hosts a live in-memory RamaSpace module, mounts its existing JSON API below `/stage6/api/`, and provides an interactive registration, friendship, post, profile-view, and explicit-microbatch-advance walkthrough.
+- HTTP/SSE tests cover the rendered Stage 1–5 concepts, the complete Stage 6 walkthrough, pre-advance invisibility of microbatch effects, and the mounted RamaSpace API.
+- `errorStatus` truncates on rune boundaries, and `writeSSEErrorWithResult` clears the current stage result fragment on failure so stale success state never survives an error.
+- Stage 6 uses a fixed microbatch hour bucket for profile views, eliminating a wall-clock hour-boundary flake in both UI and tests.
+- `quick-tutorial --help` exits cleanly without a scary error log line.
 - The browser currently uses the stable DataStar v1.0.2 bundle with `datastar-go` v1.2.0; reassess the pin when a stable DataStar v2 release is available rather than using an unstable branch silently.
 
-Do not modify Sessions 3–6 while completing this tutorial UI track; another workstream owns those commands.
+The Stage 6 instance inside the teaching server is deliberately in-memory and manually advanced. The default `cmd/quick-tutorial` mode remains the durable Pebble/Temporal RamaSpace deployment. Do not modify Sessions 3–6 from this tutorial UI track; another workstream owns those commands.
 
 ## Design issues to revisit later
 

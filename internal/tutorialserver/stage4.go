@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -25,7 +26,6 @@ func (s *Server) addStage4Routes() {
 				statusSignal
 				Example string `json:"example"`
 				N       string `json:"n"`
-				Result  string `json:"result"`
 			}{statusSignal: statusSignal{Status: "ready"}, Example: "linear", N: "5"}),
 			Content: stage4Content,
 		})
@@ -40,7 +40,7 @@ func (s *Server) addStage4Routes() {
 
 		n, err := strconv.Atoi(in.N)
 		if err != nil {
-			writeSSEError(w, r, fmt.Errorf("enter an integer"))
+			writeSSEErrorWithResult(w, r, "stage4-result", fmt.Errorf("enter an integer"))
 			return
 		}
 
@@ -53,7 +53,7 @@ func (s *Server) addStage4Routes() {
 		case "loop":
 			op = loopPipeline()
 		default:
-			writeSSEError(w, r, fmt.Errorf("unknown example %q", in.Example))
+			writeSSEErrorWithResult(w, r, "stage4-result", fmt.Errorf("unknown example %q", in.Example))
 			return
 		}
 
@@ -65,14 +65,18 @@ func (s *Server) addStage4Routes() {
 
 		outs, err := tutorial.Run(op, initial)
 		if err != nil {
-			writeSSEError(w, r, err)
+			writeSSEErrorWithResult(w, r, "stage4-result", err)
 			return
 		}
 
 		out := in
-		out.Result = formatOutputs(outs)
 		out.Status = fmt.Sprintf("ran %q with n=%d", in.Example, n)
 		sse := datastar.NewSSE(w, r)
+		_ = sse.PatchElements(
+			formatOutputsHTML(in.Example, outs),
+			datastar.WithSelectorID("stage4-result"),
+			datastar.WithModeInner(),
+		)
 		_ = patchSignals(sse, out)
 	})
 }
@@ -116,25 +120,36 @@ func loopPipeline() tutorial.Op {
 	}, 1000)
 }
 
-func formatOutputs(outs []tutorial.Bindings) string {
+func formatOutputsHTML(example string, outs []tutorial.Bindings) string {
 	if len(outs) == 0 {
-		return "(no output — input was filtered out)"
+		return `<p class="muted">No output: the operation filtered out its input.</p>`
 	}
 	b := &strings.Builder{}
+	fmt.Fprintf(b, `<h3>%s dataflow output</h3><div class="output-grid">`, htmlEscape(example))
 	for i, out := range outs {
-		fmt.Fprintf(b, "output #%d:\n", i+1)
-		for k, v := range out {
-			fmt.Fprintf(b, "  %s = %v\n", k, v)
+		fmt.Fprintf(b, `<section class="result-card"><h4>Output %d</h4><dl class="result-list">`, i+1)
+		for _, key := range bindingKeys(out) {
+			fmt.Fprintf(b, `<dt>%s</dt><dd>%s</dd>`, htmlEscape(key), htmlEscape(fmt.Sprint(out[key])))
 		}
+		b.WriteString(`</dl></section>`)
 	}
+	b.WriteString(`</div>`)
 	return b.String()
+}
+
+func bindingKeys(bindings tutorial.Bindings) []string {
+	keys := make([]string, 0, len(bindings))
+	for key := range bindings {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys
 }
 
 type stage4Input struct {
 	statusSignal
 	Example string `json:"example"`
 	N       string `json:"n"`
-	Result  string `json:"result"`
 }
 
 var stage4Content = template.HTML(`
@@ -149,6 +164,8 @@ var stage4Content = template.HTML(`
     </label>
     <label>Input number (n): <input type="number" data-bind:n value="5" /></label>
     <button data-on:click="@post('/stage4/run')">Run</button>
-    <pre data-text="$result">...</pre>
+</div>
+<div id="stage4-result" class="card">
+    <p class="muted">Choose a pipeline and run it to inspect each emitted binding set.</p>
 </div>
 `)

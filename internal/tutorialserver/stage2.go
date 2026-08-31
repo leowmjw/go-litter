@@ -23,14 +23,13 @@ func (s *Server) addStage2Routes() {
 			Description: stage2Description,
 			SignalsJSON: signalsJSON(struct {
 				statusSignal
-				User          string `json:"user"`
-				Tag           string `json:"tag"`
-				Score         string `json:"score"`
-				InspectUser   string `json:"inspectUser"`
-				InspectResult string `json:"inspectResult"`
-				SumTag        string `json:"sumTag"`
-				SumUsers      string `json:"sumUsers"`
-				SumResult     string `json:"sumResult"`
+				User        string `json:"user"`
+				Tag         string `json:"tag"`
+				Score       string `json:"score"`
+				InspectUser string `json:"inspectUser"`
+				SumTag      string `json:"sumTag"`
+				SumUsers    string `json:"sumUsers"`
+				SumResult   string `json:"sumResult"`
 			}{statusSignal: statusSignal{Status: "ready"}}),
 			Content: stage2Content,
 		})
@@ -45,12 +44,12 @@ func (s *Server) addStage2Routes() {
 
 		score, err := strconv.ParseInt(in.Score, 10, 64)
 		if err != nil || score <= 0 {
-			writeSSEError(w, r, fmt.Errorf("score must be a positive integer"))
+			writeSSEErrorWithResult(w, r, "stage2-result", fmt.Errorf("score must be a positive integer"))
 			return
 		}
 
 		if err := s.stage2.Record(r.Context(), tutorial.Activity{User: in.User, Tag: in.Tag, Score: score}); err != nil {
-			writeSSEError(w, r, err)
+			writeSSEErrorWithResult(w, r, "stage2-result", err)
 			return
 		}
 
@@ -71,38 +70,37 @@ func (s *Server) addStage2Routes() {
 
 		total, err := s.stage2.TotalCount(ctx)
 		if err != nil {
-			writeSSEError(w, r, err)
+			writeSSEErrorWithResult(w, r, "stage2-result", err)
 			return
 		}
 
 		score, scoreFound, err := s.stage2.UserScore(ctx, in.InspectUser)
 		if err != nil {
-			writeSSEError(w, r, err)
+			writeSSEErrorWithResult(w, r, "stage2-result", err)
 			return
 		}
 
 		tags, err := s.stage2.UserTags(ctx, in.InspectUser)
 		if err != nil {
-			writeSSEError(w, r, err)
+			writeSSEErrorWithResult(w, r, "stage2-result", err)
 			return
 		}
 
 		events, err := s.stage2.UserEvents(ctx, in.InspectUser)
 		if err != nil {
-			writeSSEError(w, r, err)
+			writeSSEErrorWithResult(w, r, "stage2-result", err)
 			return
 		}
 
 		rec, recFound, err := s.stage2.UserRecord(ctx, in.InspectUser)
 		if err != nil {
-			writeSSEError(w, r, err)
+			writeSSEErrorWithResult(w, r, "stage2-result", err)
 			return
 		}
 
 		resultHTML := stage2InspectHTML(in.InspectUser, total, score, scoreFound, tags, events, rec, recFound)
 
 		out := in
-		out.InspectResult = "(see rendered result above)"
 		out.Status = fmt.Sprintf("inspected %q", in.InspectUser)
 		sse := datastar.NewSSE(w, r)
 		_ = sse.PatchElements(resultHTML, datastar.WithSelectorID("stage2-result"), datastar.WithModeInner())
@@ -119,7 +117,7 @@ func (s *Server) addStage2Routes() {
 		users := splitUsers(in.SumUsers)
 		sum, err := s.stage2.SumScoresForTag(r.Context(), in.SumTag, users)
 		if err != nil {
-			writeSSEError(w, r, err)
+			writeSSEErrorWithResult(w, r, "stage2-sum-result", err)
 			return
 		}
 
@@ -138,14 +136,13 @@ func (s *Server) addStage2Routes() {
 
 type stage2Input struct {
 	statusSignal
-	User          string `json:"user"`
-	Tag           string `json:"tag"`
-	Score         string `json:"score"`
-	InspectUser   string `json:"inspectUser"`
-	InspectResult string `json:"inspectResult"`
-	SumTag        string `json:"sumTag"`
-	SumUsers      string `json:"sumUsers"`
-	SumResult     string `json:"sumResult"`
+	User        string `json:"user"`
+	Tag         string `json:"tag"`
+	Score       string `json:"score"`
+	InspectUser string `json:"inspectUser"`
+	SumTag      string `json:"sumTag"`
+	SumUsers    string `json:"sumUsers"`
+	SumResult   string `json:"sumResult"`
 }
 
 func stage2InspectHTML(user string, total uint64, score int64, scoreFound bool, tags, events []string, rec tutorial.UserRecord, recFound bool) string {

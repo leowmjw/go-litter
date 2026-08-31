@@ -36,18 +36,25 @@ func (s *Server) addStage5Routes() {
 		}
 		ctx := r.Context()
 		if err := s.stage5Stream.Append(ctx, in.Key); err != nil {
-			writeSSEError(w, r, err)
+			writeSSEErrorWithResult(w, r, "stage5-result", err)
 			return
 		}
 		count, err := s.stage5Stream.Count(ctx, in.Key)
 		if err != nil {
-			writeSSEError(w, r, err)
+			writeSSEErrorWithResult(w, r, "stage5-result", err)
+			return
+		}
+		microCount, err := s.stage5Micro.Count(ctx, in.Key)
+		if err != nil {
+			writeSSEErrorWithResult(w, r, "stage5-result", err)
 			return
 		}
 		out := in
 		out.StreamCount = fmt.Sprintf("%d", count)
+		out.MicrobatchCount = fmt.Sprintf("%d", microCount)
 		out.Status = fmt.Sprintf("stream append for %q completed and is visible", in.Key)
 		sse := datastar.NewSSE(w, r)
+		_ = sse.PatchElements(stage5ResultHTML(in.Key, count, microCount, false), datastar.WithSelectorID("stage5-result"), datastar.WithModeInner())
 		_ = patchSignals(sse, out)
 	})
 
@@ -57,13 +64,27 @@ func (s *Server) addStage5Routes() {
 			writeSSEError(w, r, err)
 			return
 		}
-		if err := s.stage5Micro.Append(r.Context(), in.Key); err != nil {
-			writeSSEError(w, r, err)
+		ctx := r.Context()
+		if err := s.stage5Micro.Append(ctx, in.Key); err != nil {
+			writeSSEErrorWithResult(w, r, "stage5-result", err)
+			return
+		}
+		streamCount, err := s.stage5Stream.Count(ctx, in.Key)
+		if err != nil {
+			writeSSEErrorWithResult(w, r, "stage5-result", err)
+			return
+		}
+		microCount, err := s.stage5Micro.Count(ctx, in.Key)
+		if err != nil {
+			writeSSEErrorWithResult(w, r, "stage5-result", err)
 			return
 		}
 		out := in
+		out.StreamCount = fmt.Sprintf("%d", streamCount)
+		out.MicrobatchCount = fmt.Sprintf("%d", microCount)
 		out.Status = fmt.Sprintf("microbatch append for %q logged; click Advance to process", in.Key)
 		sse := datastar.NewSSE(w, r)
+		_ = sse.PatchElements(stage5ResultHTML(in.Key, streamCount, microCount, true), datastar.WithSelectorID("stage5-result"), datastar.WithModeInner())
 		_ = patchSignals(sse, out)
 	})
 
@@ -76,20 +97,38 @@ func (s *Server) addStage5Routes() {
 		ctx := r.Context()
 		n, err := s.stage5Micro.Advance(ctx)
 		if err != nil {
-			writeSSEError(w, r, err)
+			writeSSEErrorWithResult(w, r, "stage5-result", err)
 			return
 		}
-		count, err := s.stage5Micro.Count(ctx, in.Key)
+		microCount, err := s.stage5Micro.Count(ctx, in.Key)
 		if err != nil {
-			writeSSEError(w, r, err)
+			writeSSEErrorWithResult(w, r, "stage5-result", err)
+			return
+		}
+		streamCount, err := s.stage5Stream.Count(ctx, in.Key)
+		if err != nil {
+			writeSSEErrorWithResult(w, r, "stage5-result", err)
 			return
 		}
 		out := in
-		out.MicrobatchCount = fmt.Sprintf("%d", count)
+		out.StreamCount = fmt.Sprintf("%d", streamCount)
+		out.MicrobatchCount = fmt.Sprintf("%d", microCount)
 		out.Status = fmt.Sprintf("advanced microbatch; processed %d partition batch(es)", n)
 		sse := datastar.NewSSE(w, r)
+		_ = sse.PatchElements(stage5ResultHTML(in.Key, streamCount, microCount, false), datastar.WithSelectorID("stage5-result"), datastar.WithModeInner())
 		_ = patchSignals(sse, out)
 	})
+}
+
+func stage5ResultHTML(key string, streamCount, microCount uint64, pending bool) string {
+	microState := "checkpoint committed"
+	if pending {
+		microState = "depot append pending; PState unchanged"
+	}
+	return fmt.Sprintf(
+		`<h3>Key <code>%s</code></h3><div class="comparison-grid"><section class="result-card"><h4>Stream ETL</h4><p class="metric">%d</p><p>Acknowledged and immediately queryable.</p></section><section class="result-card"><h4>Microbatch ETL</h4><p class="metric">%d</p><p>%s</p></section></div>`,
+		htmlEscape(key), streamCount, microCount, htmlEscape(microState),
+	)
 }
 
 type stage5Input struct {
@@ -106,7 +145,11 @@ var stage5Content = template.HTML(`
     <button data-on:click="@post('/stage5/stream-ping')">Stream Ping</button>
     <button data-on:click="@post('/stage5/microbatch-ping')">Microbatch Ping</button>
     <button data-on:click="@post('/stage5/advance')">Advance Microbatch</button>
-    <p>Stream count: <code data-text="$streamCount">0</code> — visible immediately after acknowledge.</p>
-    <p>Microbatch count: <code data-text="$microbatchCount">0</code> — visible only after Advance.</p>
+</div>
+<div id="stage5-result" class="card">
+    <div class="comparison-grid">
+        <section class="result-card"><h4>Stream ETL</h4><p class="metric">0</p><p>Visible after acknowledged append.</p></section>
+        <section class="result-card"><h4>Microbatch ETL</h4><p class="metric">0</p><p>Visible after a committed batch.</p></section>
+    </div>
 </div>
 `)

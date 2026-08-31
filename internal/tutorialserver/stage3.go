@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
-	"strings"
 
 	"github.com/starfederation/datastar-go/datastar"
 
@@ -27,8 +26,6 @@ func (s *Server) addStage3Routes() {
 				Recipient   string `json:"recipient"`
 				Message     string `json:"message"`
 				InspectUser string `json:"inspectUser"`
-				SentCount   string `json:"sentCount"`
-				Inbox       string `json:"inbox"`
 			}{statusSignal: statusSignal{Status: "ready"}}),
 			Content: stage3Content,
 		})
@@ -42,7 +39,7 @@ func (s *Server) addStage3Routes() {
 		}
 
 		if err := s.stage3.Send(r.Context(), tutorial.Mail{Sender: in.Sender, Recipient: in.Recipient, Message: in.Message}); err != nil {
-			writeSSEError(w, r, err)
+			writeSSEErrorWithResult(w, r, "stage3-result", err)
 			return
 		}
 
@@ -63,18 +60,16 @@ func (s *Server) addStage3Routes() {
 		ctx := r.Context()
 		count, err := s.stage3.SentCount(ctx, in.InspectUser)
 		if err != nil {
-			writeSSEError(w, r, err)
+			writeSSEErrorWithResult(w, r, "stage3-result", err)
 			return
 		}
 		inbox, err := s.stage3.Inbox(ctx, in.InspectUser)
 		if err != nil {
-			writeSSEError(w, r, err)
+			writeSSEErrorWithResult(w, r, "stage3-result", err)
 			return
 		}
 
 		out := in
-		out.SentCount = fmt.Sprintf("%d", count)
-		out.Inbox = strings.Join(inbox, "\n")
 		out.Status = fmt.Sprintf("inspected %q (task %d)", in.InspectUser, s.stage3.TaskOf(in.InspectUser))
 		sse := datastar.NewSSE(w, r)
 		_ = sse.PatchElements(
@@ -99,8 +94,6 @@ type stage3Input struct {
 	Recipient   string `json:"recipient"`
 	Message     string `json:"message"`
 	InspectUser string `json:"inspectUser"`
-	SentCount   string `json:"sentCount"`
-	Inbox       string `json:"inbox"`
 }
 
 var stage3Content = template.HTML(`
@@ -117,8 +110,8 @@ var stage3Content = template.HTML(`
     <h2>Inspect a user</h2>
     <label>User: <input type="text" data-bind:inspectUser placeholder="bob" /></label>
     <button data-on:click="@post('/stage3/inspect')">Inspect</button>
-    <p>Sent count: <code data-text="$sentCount">0</code></p>
-    <h3>Inbox</h3>
-    <pre data-text="$inbox">(empty)</pre>
+</div>
+<div id="stage3-result" class="card">
+    <p class="muted">Inspect a user to see their partitioned mailbox and task assignment.</p>
 </div>
 `)

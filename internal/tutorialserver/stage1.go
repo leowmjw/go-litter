@@ -39,13 +39,13 @@ func (s *Server) addStage1Routes() {
 		ctx := r.Context()
 		g := tutorial.Greeting{Name: in.Name, Message: in.Message}
 		if err := s.stage1.Say(ctx, g); err != nil {
-			writeSSEError(w, r, err)
+			writeSSEErrorWithResult(w, r, "stage1-result", err)
 			return
 		}
 
 		last, _, err := s.stage1.LastMessage(ctx, in.Name)
 		if err != nil {
-			writeSSEError(w, r, err)
+			writeSSEErrorWithResult(w, r, "stage1-result", err)
 			return
 		}
 
@@ -83,8 +83,3 @@ var stage1Content = template.HTML(`
     <p>No greeting recorded yet.</p>
 </div>
 `)
-
-func writeSSEError(w http.ResponseWriter, r *http.Request, err error) {
-	sse := datastar.NewSSE(w, r)
-	_ = sse.MarshalAndPatchSignals(statusSignal{Status: errorStatus(err)})
-}

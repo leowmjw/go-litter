@@ -15,9 +15,12 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/starfederation/datastar-go/datastar"
 
+	"app/internal/ramaspace"
+	"app/internal/sessionapp"
 	"app/internal/storage"
 	"app/internal/tutorial"
 )
@@ -48,6 +51,14 @@ var pageTmpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
         nav { margin: 1rem 0; padding: .75rem 0; border-top: 1px solid #ddd; border-bottom: 1px solid #ddd; }
         nav a { margin-right: .75rem; }
         .card { background: #fafafa; border: 1px solid #eee; border-radius: .5rem; padding: 1rem; margin: 1rem 0; }
+        .result-card { background: white; border: 1px solid #ddd; border-radius: .4rem; padding: .75rem; }
+        .result-list { display: grid; grid-template-columns: minmax(8rem, auto) 1fr; gap: .35rem 1rem; }
+        .result-list dt { font-weight: 700; }
+        .result-list dd { margin: 0; }
+        .result-list ul { margin: 0; padding-left: 1.25rem; }
+        .output-grid, .comparison-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: .75rem; }
+        .metric { font-size: 2rem; font-weight: 700; margin: .25rem 0; }
+        .muted { color: #666; }
         code { background: #eee; padding: .1rem .3rem; border-radius: .2rem; }
     </style>
 </head>
@@ -124,6 +135,7 @@ type Server struct {
 
 	stage5Stream *tutorial.Stage5StreamModule
 	stage5Micro  *tutorial.Stage5MicrobatchModule
+	stage6       *ramaspace.Module
 }
 
 // New creates a tutorial server using in-memory stores.
@@ -157,6 +169,10 @@ func New(addr string) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("stage5 microbatch: %w", err)
 	}
+	stage6, err := ramaspace.New(storage.NewMemory(), 4, ramaspace.SchemaVersion2, nil)
+	if err != nil {
+		return nil, fmt.Errorf("stage6: %w", err)
+	}
 
 	s := &Server{
 		addr:         addr,
@@ -166,6 +182,7 @@ func New(addr string) (*Server, error) {
 		stage3:       stage3,
 		stage5Stream: stage5Stream,
 		stage5Micro:  stage5Micro,
+		stage6:       stage6,
 	}
 
 	s.addIndexRoutes()
@@ -174,7 +191,8 @@ func New(addr string) (*Server, error) {
 	s.addStage3Routes()
 	s.addStage4Routes()
 	s.addStage5Routes()
-	s.addStage6Placeholder()
+	s.addStage6Routes()
+	s.mux.Handle("/stage6/api/", http.StripPrefix("/stage6/api", sessionapp.QuickTutorialHandler(stage6)))
 
 	return s, nil
 }
@@ -217,7 +235,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 }
 
 func (s *Server) addIndexRoutes() {
-	s.mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+	s.mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		writePage(w, pageData{
 			Title:       "Rama Tutorial Walkthrough",
 			Description: "Interactive Go/Temporal port of the Rama quick tutorial. Work through Stages 1–5, then launch Stage 6 (RamaSpace).",
@@ -247,10 +265,27 @@ func errorStatus(err error) string {
 	if msg == "" {
 		return "error"
 	}
-	// Keep the status line short for the UI.
+	// Keep the status line short for the UI without breaking a UTF-8 rune.
 	msg = strings.ReplaceAll(msg, "\n", " ")
-	if len(msg) > 120 {
-		msg = msg[:120] + "..."
+	if utf8.RuneCountInString(msg) > 120 {
+		runes := []rune(msg)
+		msg = string(runes[:120]) + "..."
 	}
 	return msg
+}
+
+func writeSSEError(w http.ResponseWriter, r *http.Request, err error) {
+	writeSSEErrorWithResult(w, r, "", err)
+}
+
+func writeSSEErrorWithResult(w http.ResponseWriter, r *http.Request, resultSelector string, err error) {
+	sse := datastar.NewSSE(w, r)
+	if resultSelector != "" {
+		_ = sse.PatchElements(
+			fmt.Sprintf(`<p class="muted">error: %s</p>`, htmlEscape(errorStatus(err))),
+			datastar.WithSelectorID(resultSelector),
+			datastar.WithModeInner(),
+		)
+	}
+	_ = sse.MarshalAndPatchSignals(statusSignal{Status: errorStatus(err)})
 }
