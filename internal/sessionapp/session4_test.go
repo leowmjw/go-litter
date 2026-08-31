@@ -19,6 +19,8 @@ import (
 	"app/internal/banktransfer"
 	"app/internal/controlplane"
 	"app/internal/storage"
+
+	"go.temporal.io/sdk/testsuite"
 )
 
 func TestSession4Handler(t *testing.T) {
@@ -217,6 +219,46 @@ func TestRunSession4ValidationAndErrors(t *testing.T) {
 	}
 	if err := RunSession4(context.Background(), Session4Config{Interval: time.Second, Memory: true, Address: "invalid:address"}); err == nil {
 		t.Fatal("expected listen error")
+	}
+}
+
+func TestRunSession4TemporalEndToEnd(t *testing.T) {
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	control := newTestWorkerControlPlane(t, env)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- RunSession4(ctx, Session4Config{
+			Address:           "127.0.0.1:0",
+			Memory:            true,
+			Tasks:             1,
+			Interval:          time.Hour,
+			HeartbeatInterval: time.Hour,
+			LivenessTimeout:   2 * time.Hour,
+			ControlPlane:      control,
+		})
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("run session 4: %v", err)
+	}
+
+	if env.GetWorkflowError() != nil {
+		t.Fatalf("workflow error: %v", env.GetWorkflowError())
+	}
+	var state controlplane.LifecycleState
+	if err := env.GetWorkflowResult(&state); err != nil {
+		t.Fatalf("workflow result: %v", err)
+	}
+	if state.Status != controlplane.Stopped {
+		t.Fatalf("status = %s, want %s", state.Status, controlplane.Stopped)
+	}
+	if state.Heartbeats != 1 {
+		t.Fatalf("heartbeats = %d, want 1", state.Heartbeats)
 	}
 }
 

@@ -13,23 +13,40 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"app/internal/controlplane"
 	"app/internal/musiccatalog"
 	"app/internal/storage"
+
+	"go.temporal.io/sdk/testsuite"
 )
+
+func newSession6Holder(t *testing.T, store *storage.Store, tasks uint32) (*atomic.Pointer[session6Module], func(string) (*musiccatalog.Module, error)) {
+	t.Helper()
+	build := func(version string) (*musiccatalog.Module, error) {
+		if version == "A" {
+			return musiccatalog.NewA(store, tasks)
+		}
+		return musiccatalog.NewB(store, tasks)
+	}
+	holder := &atomic.Pointer[session6Module]{}
+	module, err := build("B")
+	if err != nil {
+		t.Fatal(err)
+	}
+	holder.Store(&session6Module{version: "B", module: module})
+	return holder, build
+}
 
 func TestSession6Handler(t *testing.T) {
 	ctx := context.Background()
 	store := storage.NewMemory()
 	defer store.Close()
-	module, err := musiccatalog.NewB(store, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	handler := Session6Handler(module)
+	holder, build := newSession6Holder(t, store, 1)
+	handler := Session6Handler(holder, build)
 	health := httptest.NewRecorder()
 	handler.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if health.Code != http.StatusOK {
@@ -52,7 +69,7 @@ func TestSession6Handler(t *testing.T) {
 	if album.Code != http.StatusAccepted {
 		t.Fatalf("album status = %d body=%s", album.Code, album.Body.String())
 	}
-	if _, err := module.AdvanceAll(ctx); err != nil {
+	if _, err := holder.Load().module.AdvanceAll(ctx); err != nil {
 		t.Fatalf("advance: %v", err)
 	}
 	fetch := httptest.NewRecorder()
@@ -91,11 +108,9 @@ func TestSession6Handler(t *testing.T) {
 func TestSession6HandlerErrors(t *testing.T) {
 	store := storage.NewMemory()
 	defer store.Close()
-	module, err := musiccatalog.NewB(store, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	handler := Session6Handler(module)
+	holder, build := newSession6Holder(t, store, 1)
+	handler := Session6Handler(holder, build)
+	module := holder.Load().module
 	injected := errors.New("injected")
 	originalAppend := module.Append
 	module.Append = func(context.Context, musiccatalog.AlbumInput) error { return injected }
@@ -126,6 +141,77 @@ func TestSession6HandlerErrors(t *testing.T) {
 	handler.ServeHTTP(rebuild, httptest.NewRequest(http.MethodPost, "/admin/rebuild", nil))
 	if rebuild.Code != http.StatusInternalServerError {
 		t.Fatalf("rebuild failure status = %d", rebuild.Code)
+	}
+}
+
+func TestSession6LiveUpdateOverHTTP(t *testing.T) {
+	ctx := context.Background()
+	store := storage.NewMemory()
+	defer store.Close()
+	holder, build := newSession6Holder(t, store, 1)
+	handler := Session6Handler(holder, build)
+
+	version := httptest.NewRecorder()
+	handler.ServeHTTP(version, httptest.NewRequest(http.MethodGet, "/version", nil))
+	if version.Code != http.StatusOK {
+		t.Fatalf("version status = %d", version.Code)
+	}
+	var versionResult struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(version.Body.Bytes(), &versionResult); err != nil || versionResult.Version != "B" {
+		t.Fatalf("version = %#v, %v", versionResult, err)
+	}
+
+	// Append an album under version B (parsed schema).
+	album := httptest.NewRecorder()
+	body := bytes.NewBufferString(`{"artist":"Frank Ocean","name":"Channel Orange","songs":["White feat. John Mayer"]}`)
+	handler.ServeHTTP(album, httptest.NewRequest(http.MethodPost, "/albums", body))
+	if album.Code != http.StatusAccepted {
+		t.Fatalf("album status = %d", album.Code)
+	}
+	if _, err := holder.Load().module.AdvanceAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Live-update to version A (raw schema) without restart.
+	update := httptest.NewRecorder()
+	body = bytes.NewBufferString(`{"version":"A"}`)
+	handler.ServeHTTP(update, httptest.NewRequest(http.MethodPost, "/admin/update", body))
+	if update.Code != http.StatusOK {
+		t.Fatalf("update status = %d body=%s", update.Code, update.Body.String())
+	}
+	version = httptest.NewRecorder()
+	handler.ServeHTTP(version, httptest.NewRequest(http.MethodGet, "/version", nil))
+	var updatedVersion struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(version.Body.Bytes(), &updatedVersion); err != nil || updatedVersion.Version != "A" {
+		t.Fatalf("version after update = %#v, %v", updatedVersion, err)
+	}
+
+	// The old B-written record is still readable through the new A module.
+	fetch := httptest.NewRecorder()
+	handler.ServeHTTP(fetch, httptest.NewRequest(http.MethodGet, "/album?artist=Frank%20Ocean&name=Channel%20Orange", nil))
+	if fetch.Code != http.StatusOK {
+		t.Fatalf("album fetch after update status = %d body=%s", fetch.Code, fetch.Body.String())
+	}
+	var result musiccatalog.Album
+	if err := json.Unmarshal(fetch.Body.Bytes(), &result); err != nil || result.Songs[0].Name != "White" || result.Songs[0].FeaturedArtists[0] != "John Mayer" {
+		t.Fatalf("album after update = %#v, %v", result, err)
+	}
+
+	// Bad version rejected.
+	bad := httptest.NewRecorder()
+	body = bytes.NewBufferString(`{"version":"C"}`)
+	handler.ServeHTTP(bad, httptest.NewRequest(http.MethodPost, "/admin/update", body))
+	if bad.Code != http.StatusBadRequest {
+		t.Fatalf("bad version status = %d", bad.Code)
+	}
+	badJSON := httptest.NewRecorder()
+	handler.ServeHTTP(badJSON, httptest.NewRequest(http.MethodPost, "/admin/update", bytes.NewBufferString("{")))
+	if badJSON.Code != http.StatusBadRequest {
+		t.Fatalf("bad json status = %d", badJSON.Code)
 	}
 }
 
@@ -205,6 +291,47 @@ func TestRunSession6ValidationAndErrors(t *testing.T) {
 	}
 	if err := RunSession6(context.Background(), Session6Config{Interval: time.Second, Memory: true, Address: "127.0.0.1:0", Tasks: 1, Version: "B", ControlPlane: control}); err == nil {
 		t.Fatal("expected control plane start error")
+	}
+}
+
+func TestRunSession6TemporalEndToEnd(t *testing.T) {
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	control := newTestWorkerControlPlane(t, env)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- RunSession6(ctx, Session6Config{
+			Address:           "127.0.0.1:0",
+			Memory:            true,
+			Tasks:             1,
+			Interval:          time.Hour,
+			Version:           "B",
+			HeartbeatInterval: time.Hour,
+			LivenessTimeout:   2 * time.Hour,
+			ControlPlane:      control,
+		})
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("run session 6: %v", err)
+	}
+
+	if env.GetWorkflowError() != nil {
+		t.Fatalf("workflow error: %v", env.GetWorkflowError())
+	}
+	var state controlplane.LifecycleState
+	if err := env.GetWorkflowResult(&state); err != nil {
+		t.Fatalf("workflow result: %v", err)
+	}
+	if state.Status != controlplane.Stopped {
+		t.Fatalf("status = %s, want %s", state.Status, controlplane.Stopped)
+	}
+	if state.Heartbeats != 1 {
+		t.Fatalf("heartbeats = %d, want 1", state.Heartbeats)
 	}
 }
 

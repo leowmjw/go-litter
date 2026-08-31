@@ -36,6 +36,7 @@ var (
 type Module struct {
 	Fetch       func(context.Context, string) (string, error)
 	Append      func(context.Context, string) error
+	Enqueue     func(context.Context, string) (uint64, error)
 	Replay      func(context.Context) error
 	Rebuild     func(context.Context) error
 	GetResponse func(context.Context, string) (string, bool, error)
@@ -103,6 +104,12 @@ func New(store *storage.Store, taskCount uint32) (*Module, error) {
 		}
 		_, err := runtime.Append(ctx, GetDepot, "", []byte(url))
 		return err
+	}
+	module.Enqueue = func(ctx context.Context, url string) (uint64, error) {
+		if url == "" {
+			return 0, ErrEmptyURL
+		}
+		return runtime.Enqueue(ctx, GetDepot, "", []byte(url))
 	}
 	module.Replay = runtime.Replay
 	module.Rebuild = runtime.Rebuild

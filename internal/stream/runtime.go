@@ -36,6 +36,7 @@ type Source struct {
 
 type Runtime struct {
 	Append  func(context.Context, storage.DepotID, string, []byte) (Ack, error)
+	Enqueue func(context.Context, storage.DepotID, string, []byte) (uint64, error)
 	Replay  func(context.Context) error
 	Rebuild func(context.Context) error
 }
@@ -204,6 +205,26 @@ func New(module storage.ModuleID, taskCount uint32, choosePartition func([]byte)
 			result[source.Topology] = ack
 		}
 		return result, nil
+	}
+	runtime.Enqueue = func(ctx context.Context, depot storage.DepotID, id string, payload []byte) (uint64, error) {
+		source, ok := byDepot[depot]
+		if !ok {
+			return 0, fmt.Errorf("%w: %s", ErrSourceNotFound, depot)
+		}
+		partitionKey, err := source.PartitionKey(payload)
+		if err != nil {
+			return 0, err
+		}
+		partition := choosePartition(partitionKey)
+		if partition >= taskCount {
+			return 0, ErrPartition
+		}
+		maintenance.RLock()
+		defer maintenance.RUnlock()
+		taskLocks[partition].Lock()
+		defer taskLocks[partition].Unlock()
+		record, _, err := store.Append(ctx, storage.DepotPartition{Module: module, Depot: depot, Partition: partition}, id, payload)
+		return record.Position, err
 	}
 	runtime.Replay = func(ctx context.Context) error {
 		maintenance.Lock()

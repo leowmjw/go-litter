@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"app/internal/controlplane"
@@ -21,6 +22,14 @@ const (
 	defaultSession6TaskQueue  = "session-6-control-plane"
 	defaultSession6WorkflowID = "session-6-musiccatalog-lifecycle"
 )
+
+// session6Module holds the active MusicCatalog module version. The current
+// pointer is swapped atomically by a live update, letting the old and new
+// module versions coexist over the same store during a rollout.
+type session6Module struct {
+	version string
+	module  *musiccatalog.Module
+}
 
 // Session6Config bundles the settings for the MusicCatalog (session-6) HTTP server.
 type Session6Config struct {
@@ -40,10 +49,28 @@ type Session6Config struct {
 }
 
 // Session6Handler mounts the MusicCatalog HTTP endpoints on a mux.
-func Session6Handler(module *musiccatalog.Module) *http.ServeMux {
+// The holder is consulted on every request so a live module update takes
+// effect without restarting the process. buildModule constructs a module
+// version over the shared store for /admin/update.
+func Session6Handler(holder *atomic.Pointer[session6Module], buildModule func(string) (*musiccatalog.Module, error)) *http.ServeMux {
 	mux := http.NewServeMux()
+	current := func() *session6Module {
+		entry := holder.Load()
+		if entry == nil {
+			return nil
+		}
+		return entry
+	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+	mux.HandleFunc("GET /version", func(w http.ResponseWriter, _ *http.Request) {
+		entry := current()
+		if entry == nil {
+			writeError(w, http.StatusInternalServerError, errors.New("module not initialized"))
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"version": entry.version})
 	})
 	mux.HandleFunc("POST /albums", func(w http.ResponseWriter, r *http.Request) {
 		var a musiccatalog.AlbumInput
@@ -51,7 +78,7 @@ func Session6Handler(module *musiccatalog.Module) *http.ServeMux {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
-		if err := module.Append(r.Context(), a); err != nil {
+		if err := current().module.Append(r.Context(), a); err != nil {
 			status := http.StatusInternalServerError
 			if errors.Is(err, musiccatalog.ErrInvalidAlbum) {
 				status = http.StatusBadRequest
@@ -69,7 +96,7 @@ func Session6Handler(module *musiccatalog.Module) *http.ServeMux {
 			writeError(w, http.StatusBadRequest, errors.New("artist and name are required"))
 			return
 		}
-		album, found, err := module.GetAlbum(r.Context(), artist, name)
+		album, found, err := current().module.GetAlbum(r.Context(), artist, name)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
@@ -86,7 +113,7 @@ func Session6Handler(module *musiccatalog.Module) *http.ServeMux {
 			writeError(w, http.StatusBadRequest, errors.New("artist is required"))
 			return
 		}
-		count, err := module.CountAlbums(r.Context(), artist)
+		count, err := current().module.CountAlbums(r.Context(), artist)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
@@ -94,11 +121,31 @@ func Session6Handler(module *musiccatalog.Module) *http.ServeMux {
 		writeJSON(w, http.StatusOK, map[string]any{"artist": artist, "count": count})
 	})
 	mux.HandleFunc("POST /admin/rebuild", func(w http.ResponseWriter, r *http.Request) {
-		if err := module.Rebuild(r.Context()); err != nil {
+		if err := current().module.Rebuild(r.Context()); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "rebuilt"})
+	})
+	mux.HandleFunc("POST /admin/update", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Version string `json:"version"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if req.Version != "A" && req.Version != "B" {
+			writeError(w, http.StatusBadRequest, errors.New("version must be A or B"))
+			return
+		}
+		next, err := buildModule(req.Version)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		holder.Store(&session6Module{version: req.Version, module: next})
+		writeJSON(w, http.StatusOK, map[string]string{"version": req.Version, "status": "updated"})
 	})
 	return mux
 }
@@ -127,15 +174,18 @@ func RunSession6(ctx context.Context, config Session6Config) (runErr error) {
 	}
 	defer func() { runErr = errors.Join(runErr, store.Close()) }()
 
-	var module *musiccatalog.Module
-	if config.Version == "A" {
-		module, err = musiccatalog.NewA(store, uint32(config.Tasks))
-	} else {
-		module, err = musiccatalog.NewB(store, uint32(config.Tasks))
+	newModule := func(version string) (*musiccatalog.Module, error) {
+		if version == "A" {
+			return musiccatalog.NewA(store, uint32(config.Tasks))
+		}
+		return musiccatalog.NewB(store, uint32(config.Tasks))
 	}
+	module, err := newModule(config.Version)
 	if err != nil {
 		return fmt.Errorf("new module: %w", err)
 	}
+	holder := &atomic.Pointer[session6Module]{}
+	holder.Store(&session6Module{version: config.Version, module: module})
 
 	controlErrors, controlCleanup, err := StartControlPlane(ctx, musiccatalog.ModuleName, config.Version, uint32(config.Tasks), ControlPlaneConfig{
 		Address:           config.TemporalAddress,
@@ -158,7 +208,7 @@ func RunSession6(ctx context.Context, config Session6Config) (runErr error) {
 		return fmt.Errorf("listen: %w", err)
 	}
 	server := &http.Server{
-		Handler:           Session6Handler(module),
+		Handler:           Session6Handler(holder, newModule),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -173,7 +223,7 @@ func RunSession6(ctx context.Context, config Session6Config) (runErr error) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if _, err := module.AdvanceAll(ctx); err != nil {
+				if _, err := holder.Load().module.AdvanceAll(ctx); err != nil {
 					slog.Error("advance failed", "error", err)
 					select {
 					case advanceErrors <- err:
@@ -228,7 +278,7 @@ func parseSession6Config(args []string, getenv func(string) string) (Session6Con
 	flags.BoolVar(&config.Memory, "memory", false, "use non-durable in-memory storage")
 	flags.UintVar(&config.Tasks, "tasks", 4, "power-of-two logical task count")
 	flags.DurationVar(&config.Interval, "interval", 30*time.Second, "microbatch advance interval")
-	flags.StringVar(&config.Version, "version", "B", "module version: A (raw songs) or B (parsed songs)")
+	flags.StringVar(&config.Version, "version", "A", "initial module version: A (raw songs) or B (parsed songs)")
 	flags.StringVar(&config.TemporalAddress, "temporal-address", getenv("TEMPORAL_ADDRESS"), "Temporal server address; empty disables the control plane")
 	flags.StringVar(&config.TemporalNamespace, "temporal-namespace", envOr(getenv, "TEMPORAL_NAMESPACE", defaultTemporalNamespace), "Temporal namespace")
 	flags.StringVar(&config.TemporalTaskQueue, "temporal-task-queue", envOr(getenv, "SESSION6_TEMPORAL_TASK_QUEUE", defaultSession6TaskQueue), "Temporal lifecycle task queue")

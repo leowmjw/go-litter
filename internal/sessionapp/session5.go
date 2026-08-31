@@ -32,6 +32,8 @@ type Session5Config struct {
 	DataPath          string
 	Memory            bool
 	Tasks             uint
+	Interval          time.Duration
+	Fetch             func(context.Context, string) (string, error)
 	TemporalAddress   string
 	TemporalNamespace string
 	TemporalTaskQueue string
@@ -53,7 +55,9 @@ func Session5Handler(module *restapi.Module) *http.ServeMux {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
-		if err := module.Append(r.Context(), req.URL); err != nil {
+		// Enqueue the URL and let the background worker perform the outbound
+		// HTTP GET, keeping the request path free of external I/O.
+		if _, err := module.Enqueue(r.Context(), req.URL); err != nil {
 			status := http.StatusInternalServerError
 			if errors.Is(err, restapi.ErrEmptyURL) || errors.Is(err, restapi.ErrUnsafeURL) || errors.Is(err, restapi.ErrResponseTooLarge) {
 				status = http.StatusBadRequest
@@ -99,6 +103,9 @@ func Session5Handler(module *restapi.Module) *http.ServeMux {
 
 // RunSession5 runs the RestAPI HTTP server with optional Temporal lifecycle.
 func RunSession5(ctx context.Context, config Session5Config) (runErr error) {
+	if config.Interval <= 0 {
+		return errors.New("interval must be positive")
+	}
 	if config.Tasks > uint(^uint32(0)) {
 		return fmt.Errorf("task count exceeds uint32: %d", config.Tasks)
 	}
@@ -118,6 +125,9 @@ func RunSession5(ctx context.Context, config Session5Config) (runErr error) {
 	module, err := restapi.New(store, uint32(config.Tasks))
 	if err != nil {
 		return fmt.Errorf("new module: %w", err)
+	}
+	if config.Fetch != nil {
+		module.Fetch = config.Fetch
 	}
 
 	controlErrors, controlCleanup, err := StartControlPlane(ctx, restapi.ModuleName, "session-5", uint32(config.Tasks), ControlPlaneConfig{
@@ -147,6 +157,29 @@ func RunSession5(ctx context.Context, config Session5Config) (runErr error) {
 		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       time.Minute,
 	}
+	// The background worker drains the GET depot on an interval, performing
+	// the outbound HTTP fetches off the request path. Failed fetches stop the
+	// session and are surfaced as a run error so liveness is observable.
+	workerErrors := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(config.Interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := module.Replay(ctx); err != nil {
+					slog.Error("fetch worker failed", "error", err)
+					select {
+					case workerErrors <- err:
+					default:
+					}
+					return
+				}
+			}
+		}
+	}()
 	slog.Info("session-5 ready", "address", listener.Addr().String(), "storage", map[bool]string{true: "memory", false: "pebble"}[config.Memory], "temporal", controlErrors != nil)
 	serveErr := make(chan error, 1)
 	go func() {
@@ -162,6 +195,8 @@ func RunSession5(ctx context.Context, config Session5Config) (runErr error) {
 	case err := <-serveErr:
 		runErr = err
 	case err := <-controlErrors:
+		runErr = err
+	case err := <-workerErrors:
 		runErr = err
 	}
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
@@ -188,6 +223,7 @@ func parseSession5Config(args []string, getenv func(string) string) (Session5Con
 	flags.StringVar(&config.DataPath, "data", ".data/session-5", "Pebble data directory")
 	flags.BoolVar(&config.Memory, "memory", false, "use non-durable in-memory storage")
 	flags.UintVar(&config.Tasks, "tasks", 4, "power-of-two logical task count")
+	flags.DurationVar(&config.Interval, "interval", 30*time.Second, "fetch worker drain interval")
 	flags.StringVar(&config.TemporalAddress, "temporal-address", getenv("TEMPORAL_ADDRESS"), "Temporal server address; empty disables the control plane")
 	flags.StringVar(&config.TemporalNamespace, "temporal-namespace", envOr(getenv, "TEMPORAL_NAMESPACE", defaultTemporalNamespace), "Temporal namespace")
 	flags.StringVar(&config.TemporalTaskQueue, "temporal-task-queue", envOr(getenv, "SESSION5_TEMPORAL_TASK_QUEUE", defaultSession5TaskQueue), "Temporal lifecycle task queue")

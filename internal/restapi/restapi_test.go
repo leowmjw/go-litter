@@ -53,6 +53,65 @@ func TestRestAPIModule(t *testing.T) {
 	}
 }
 
+func TestRestAPIModuleEnqueueAsync(t *testing.T) {
+	ctx := context.Background()
+	store := storage.NewMemory()
+	defer store.Close()
+	m, err := New(store, 4)
+	if err != nil {
+		t.Fatalf("new module: %v", err)
+	}
+	fetchCalls := 0
+	m.Fetch = func(ctx context.Context, url string) (string, error) {
+		fetchCalls++
+		return fmt.Sprintf("body for %s", url), nil
+	}
+
+	url1 := "https://example.com/joke/1"
+	position, err := m.Enqueue(ctx, url1)
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if position == 0 {
+		t.Fatal("expected a positive depot position")
+	}
+	if fetchCalls != 0 {
+		t.Fatalf("enqueue must not fetch synchronously: calls = %d", fetchCalls)
+	}
+	if _, found, err := m.GetResponse(ctx, url1); err != nil || found {
+		t.Fatalf("response before replay: found=%v err=%v", found, err)
+	}
+	if err := m.Replay(ctx); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if fetchCalls != 1 {
+		t.Fatalf("replay must fetch once: calls = %d", fetchCalls)
+	}
+	body, found, err := m.GetResponse(ctx, url1)
+	if err != nil || !found || body != "body for "+url1 {
+		t.Fatalf("response = %q, found=%v, err=%v", body, found, err)
+	}
+	// Replay is idempotent: no duplicate fetch, same response.
+	if err := m.Replay(ctx); err != nil {
+		t.Fatalf("replay again: %v", err)
+	}
+	if fetchCalls != 1 {
+		t.Fatalf("replay must be idempotent: calls = %d", fetchCalls)
+	}
+}
+
+func TestRestAPIModuleEnqueueValidation(t *testing.T) {
+	store := storage.NewMemory()
+	defer store.Close()
+	m, err := New(store, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Enqueue(context.Background(), ""); !errors.Is(err, ErrEmptyURL) {
+		t.Fatalf("empty url error = %v", err)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {

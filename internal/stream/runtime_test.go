@@ -204,6 +204,51 @@ func TestRuntimeDoesNotSkipFailedRecord(t *testing.T) {
 	}
 }
 
+func TestRuntimeEnqueueDefersProcessingToReplay(t *testing.T) {
+	ctx := context.Background()
+	store := storage.NewMemory()
+	defer store.Close()
+	choose, _ := partition.New(2)
+	handlerCalls := 0
+	handler := func(ctx context.Context, event *Event, _ storage.Record, task uint32) ([]byte, error) {
+		handlerCalls++
+		value, _, err := event.Get(ctx, storage.StatePartition{Module: "module", State: "counts", Partition: task}, []byte("key"))
+		if err != nil {
+			return nil, err
+		}
+		encoded := binary.BigEndian.AppendUint64(nil, decodeTestUint64(value)+1)
+		event.Set(storage.StatePartition{Module: "module", State: "counts", Partition: task}, []byte("key"), encoded)
+		return encoded, nil
+	}
+	runtime, err := New("module", 2, choose, store, Source{Depot: "events", Topology: "count", PartitionKey: func([]byte) ([]byte, error) { return []byte("key"), nil }, Handle: handler})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Enqueue(ctx, "events", "request-1", []byte("event")); err != nil {
+		t.Fatal(err)
+	}
+	if handlerCalls != 0 {
+		t.Fatalf("enqueue must not process: handlerCalls = %d", handlerCalls)
+	}
+	if err := runtime.Replay(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if handlerCalls != 1 {
+		t.Fatalf("replay must process enqueued record: handlerCalls = %d", handlerCalls)
+	}
+	value, found, err := store.GetState(ctx, storage.StatePartition{Module: "module", State: "counts", Partition: choose([]byte("key"))}, []byte("key"))
+	if err != nil || !found || decodeTestUint64(value) != 1 {
+		t.Fatalf("value=%d found=%v err=%v", decodeTestUint64(value), found, err)
+	}
+	// Replay again is idempotent: already committed, handler must not rerun.
+	if err := runtime.Replay(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if handlerCalls != 1 {
+		t.Fatalf("replay must be idempotent: handlerCalls = %d", handlerCalls)
+	}
+}
+
 func TestRuntimeValidation(t *testing.T) {
 	store := storage.NewMemory()
 	defer store.Close()

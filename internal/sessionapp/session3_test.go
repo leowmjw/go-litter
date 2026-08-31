@@ -19,6 +19,8 @@ import (
 	"app/internal/controlplane"
 	"app/internal/storage"
 	"app/internal/topusers"
+
+	"go.temporal.io/sdk/testsuite"
 )
 
 func TestSession3Handler(t *testing.T) {
@@ -195,6 +197,47 @@ func TestRunSession3ValidationAndErrors(t *testing.T) {
 	}
 	if err := RunSession3(context.Background(), Session3Config{Interval: time.Second, Memory: true, Address: "127.0.0.1:0", Tasks: 1, ControlPlane: control}); err == nil {
 		t.Fatal("expected control plane start error")
+	}
+}
+
+func TestRunSession3TemporalEndToEnd(t *testing.T) {
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	control := newTestWorkerControlPlane(t, env)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- RunSession3(ctx, Session3Config{
+			Address:           "127.0.0.1:0",
+			Memory:            true,
+			Tasks:             1,
+			Interval:          time.Hour,
+			TopAmount:         3,
+			HeartbeatInterval: time.Hour,
+			LivenessTimeout:   2 * time.Hour,
+			ControlPlane:      control,
+		})
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("run session 3: %v", err)
+	}
+
+	if env.GetWorkflowError() != nil {
+		t.Fatalf("workflow error: %v", env.GetWorkflowError())
+	}
+	var state controlplane.LifecycleState
+	if err := env.GetWorkflowResult(&state); err != nil {
+		t.Fatalf("workflow result: %v", err)
+	}
+	if state.Status != controlplane.Stopped {
+		t.Fatalf("status = %s, want %s", state.Status, controlplane.Stopped)
+	}
+	if state.Heartbeats != 1 {
+		t.Fatalf("heartbeats = %d, want 1", state.Heartbeats)
 	}
 }
 
