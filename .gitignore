@@ -13,7 +13,7 @@ bin/
 .air-session-*/
 .data/
 .temporal/
-session-*
+/session-*
 
 # Test binary, built with `go test -c`
 *.test
@@ -54,3 +54,7 @@ mise.local.toml
 
 # Ignore Archive
 ARCHIVE
+
+# Ignore any Agentic Toolng ..
+.commandcode
+

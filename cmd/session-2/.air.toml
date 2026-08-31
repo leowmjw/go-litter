@@ -1,0 +1,11 @@
+root = "."
+tmp_dir = ".air-session-2"
+
+[build]
+cmd = "go build -o ./.air-session-2/session-2 ./cmd/session-2"
+bin = "./.air-session-2/session-2"
+include_ext = ["go", "toml"]
+exclude_dir = [".air-session-2", ".data", ".git", ".temporal", "ARCHIVE", "EXAMPLE"]
+stop_on_error = true
+send_interrupt = true
+kill_delay = "500ms"
